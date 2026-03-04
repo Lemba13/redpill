@@ -1,0 +1,31 @@
+# RedPill configuration — copy to config.yaml and edit
+
+topic: "contrastive learning"
+
+search_queries:
+  - "contrastive learning 2026"
+  - "contrastive learning new paper"
+  - "contrastive learning breakthrough"
+
+max_results_per_query: 10
+
+dedup_similarity_threshold: 0.85
+
+# "markdown" writes to data/digests/YYYY-MM-DD.md
+# "email" sends via SMTP (requires email_config below)
+delivery_method: "markdown"
+
+llm_provider: "ollama"  # "ollama" | "anthropic" | "openai"
+
+ollama_config:
+  base_url: "http://localhost:11434"
+  model: "llama3.1"  # e.g. "mistral", "qwen2.5"
+
+embedding_model: "all-MiniLM-L6-v2"
+
+# Required only if delivery_method is "email"
+email_config:
+  smtp_host: "smtp.example.com"
+  smtp_port: 587
+  sender: "redpill@example.com"
+  recipient: "you@example.com"

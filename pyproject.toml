@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redpill"
+version = "0.1.0"
+description = "Daily AI-powered research digest agent"
+requires-python = ">=3.11"
+dependencies = [
+    "tavily-python",
+    "trafilatura",
+    "sentence-transformers",
+    "ollama",
+    "pyyaml",
+    "python-dotenv",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-mock",
+]
+
+[project.scripts]
+redpill = "redpill.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["redpill*"]
