@@ -108,22 +108,21 @@
 
 ---
 
-## Phase 5 — Summarization (summarize.py)
+## Phase 5 — Summarization (summarize.py) ✅
 
-- [ ] Implement `summarize_item(content: str, topic: str) -> dict` using Ollama Python client
+- [x] Implement `summarize_item(content: str, topic: str) -> dict` using Ollama Python client
   - Connect to Ollama at configured `base_url` with configured `model`
   - Prompt should ask for: `title`, `summary` (2-3 sentences), `key_insight` (one line on why it matters), `relevance_score` (1-5 how relevant to the topic)
   - Return structured dict parsed from LLM response (instruct the model to respond in JSON)
   - Use a system prompt that establishes the agent's role as a research assistant
-- [ ] Implement `generate_digest(items: list[dict], topic: str, date: str) -> str`
-  - Send all items to Ollama in a single call
-  - Ask it to produce a formatted daily digest in markdown
+- [x] Implement `generate_digest(items: list[dict], topic: str, date: str) -> str`
+  - Produces a formatted daily digest in markdown
   - Include: date header, item count, then each item with title, summary, key insight, and source link
   - Sort by relevance_score descending
-- [ ] Add a health check: verify Ollama is running and the configured model is pulled before starting
-- [ ] Handle Ollama connection errors and timeouts gracefully
-- [ ] Abstract LLM calls behind a simple interface (`LLMClient` with a `generate` method) so swapping providers later is just a new implementation
-- [ ] Write tests with mocked API responses
+- [x] Add a health check: verify Ollama is running and the configured model is pulled before starting
+- [x] Handle Ollama connection errors and timeouts gracefully
+- [x] Abstract LLM calls behind a simple interface (`LLMClient` with a `generate` method) so swapping providers later is just a new implementation
+- [x] Write tests with mocked API responses
 
 ---
 
