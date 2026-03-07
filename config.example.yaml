@@ -19,7 +19,7 @@ llm_provider: "ollama"  # "ollama" | "anthropic" | "openai"
 
 ollama_config:
   base_url: "http://localhost:11434"
-  model: "llama3.1"  # e.g. "mistral", "qwen2.5"
+  model: "qwen3.5:4b"  # e.g. "mistral", "llama3.1"
 
 embedding_model: "all-MiniLM-L6-v2"
 
