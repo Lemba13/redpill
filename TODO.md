@@ -70,9 +70,9 @@
 
 ---
 
-## Phase 3 — State Management (state.py)
+## Phase 3 — State Management (state.py) ✅
 
-- [ ] Create SQLite database with a single table `seen_items`:
+- [x] Create SQLite database with a single table `seen_items`:
   - `id`: INTEGER PRIMARY KEY AUTOINCREMENT
   - `url`: TEXT UNIQUE
   - `title`: TEXT
@@ -81,30 +81,30 @@
   - `summary`: TEXT
   - `first_seen_date`: TEXT (ISO format)
   - `topic`: TEXT
-- [ ] Implement `init_db(db_path: str)` — creates table if not exists
-- [ ] Implement `is_url_seen(url: str) -> bool` — exact URL match
-- [ ] Implement `get_all_embeddings() -> list[tuple[int, np.ndarray]]` — returns id + embedding pairs for similarity search
-- [ ] Implement `add_item(url, title, content_hash, embedding, summary)` — insert new row
-- [ ] Implement `get_items_since(date: str) -> list[dict]` — for retrieving past digests
-- [ ] Write tests using an in-memory SQLite database
+- [x] Implement `init_db(db_path: str)` — creates table if not exists
+- [x] Implement `is_url_seen(url: str) -> bool` — exact URL match
+- [x] Implement `get_all_embeddings() -> list[tuple[int, np.ndarray]]` — returns id + embedding pairs for similarity search
+- [x] Implement `add_item(url, title, content_hash, embedding, summary)` — insert new row
+- [x] Implement `get_items_since(date: str) -> list[dict]` — for retrieving past digests
+- [x] Write tests using an in-memory SQLite database
 
 ---
 
-## Phase 4 — Deduplication Engine (dedup.py)
+## Phase 4 — Deduplication Engine (dedup.py) ✅
 
-- [ ] Implement `compute_embedding(text: str) -> np.ndarray` using sentence-transformers `all-MiniLM-L6-v2`
+- [x] Implement `compute_embedding(text: str) -> np.ndarray` using sentence-transformers `all-MiniLM-L6-v2`
   - Load model once at module level (lazy singleton)
   - Truncate input text to first 512 tokens to stay within model limits
-- [ ] Implement `is_semantic_duplicate(embedding: np.ndarray, existing_embeddings: list[tuple[id, np.ndarray]], threshold: float) -> bool`
+- [x] Implement `is_semantic_duplicate(embedding: np.ndarray, existing_embeddings: list[tuple[id, np.ndarray]], threshold: float) -> bool`
   - Compute cosine similarity against all existing embeddings
   - Return True if any similarity exceeds threshold
   - Also return the closest match ID and score for logging purposes
-- [ ] Implement `filter_new_items(candidates: list[dict], db: StateDB, threshold: float) -> list[dict]`
+- [x] Implement `filter_new_items(candidates: list[dict], db: StateDB, threshold: float) -> list[dict]`
   - First pass: filter out already-seen URLs (cheap)
   - Second pass: compute embeddings for remaining candidates, filter out semantic duplicates (expensive)
   - Return only genuinely new items
-- [ ] Log every dedup decision: "KEPT: {title}" or "DROPPED (url_match): {title}" or "DROPPED (semantic, score={score}): {title} ~ {matched_title}"
-- [ ] Write tests with known duplicate and non-duplicate pairs
+- [x] Log every dedup decision: "KEPT: {title}" or "DROPPED (url_match): {title}" or "DROPPED (semantic, score={score}): {title} ~ {matched_title}"
+- [x] Write tests with known duplicate and non-duplicate pairs
 
 ---
 
