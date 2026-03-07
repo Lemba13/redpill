@@ -15,6 +15,7 @@ dependencies = [
     "pyyaml",
     "python-dotenv",
     "numpy",
+    "markdown",
 ]
 
 [project.optional-dependencies]

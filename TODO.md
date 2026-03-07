@@ -126,14 +126,15 @@
 
 ---
 
-## Phase 6 — Delivery (deliver.py)
+## Phase 6 — Delivery (deliver.py) ✅
 
-- [ ] Implement `deliver_markdown(digest: str, output_dir: str, date: str)` — writes digest to `data/digests/YYYY-MM-DD.md`
-- [ ] Implement `deliver_email(digest: str, config: dict)` — sends digest via SMTP
-  - Convert markdown to simple HTML for the email body
+- [x] Implement `deliver_markdown(digest: str, output_dir: str, date: str)` — writes digest to `data/digests/YYYY-MM-DD.md`
+- [x] Implement `deliver_email(digest: str, topic: str, date: str, config: dict)` — sends digest via SMTP
+  - multipart/alternative: plain text + HTML (via `markdown` library)
   - Subject line: "RedPill Digest: {topic} — {date}"
-- [ ] Implement `deliver(digest: str, config: dict)` — dispatcher that calls the right method based on config
-- [ ] Write tests (mock SMTP, verify markdown file creation)
+- [x] Implement `deliver(digest: str, topic: str, date: str, config: dict)` — dispatcher with config validation
+- [x] `DeliveryError` custom exception as error contract for Phase 7
+- [x] Write tests (mock SMTP, verify markdown file creation)
 
 ---
 
