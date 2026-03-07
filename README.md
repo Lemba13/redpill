@@ -27,15 +27,16 @@ Edit `config.yaml` with your topic and queries. Add your `TAVILY_API_KEY` to `.e
 
 - Python 3.11+
 - [Tavily API key](https://tavily.com) (free tier: 1000 searches/month)
-- [Ollama](https://ollama.com) running locally with a model pulled (e.g. `ollama pull llama3.1`)
+- [Ollama](https://ollama.com) running locally with a model pulled (e.g. `ollama pull qwen3:4b`)
 
 ## Usage
 
 ```bash
-redpill run              # full pipeline
-redpill run --dry-run    # skip delivery and state update
-redpill history --last 7 # show last 7 digests
-redpill stats            # summary stats
+redpill run                   # full pipeline
+redpill run --dry-run         # search → extract → dedup → summarize, print to stdout only
+redpill run --config my.yaml  # use a custom config file
+redpill history --last 7      # show last 7 digests
+redpill stats                 # total seen, avg per day, top sources
 ```
 
 ## Scheduling
@@ -46,16 +47,14 @@ Add to cron to run daily at 7 AM:
 0 7 * * * cd /path/to/redpill && redpill run
 ```
 
-Or use the included GitHub Actions workflow for cloud scheduling.
-
 ## Project status
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 1 | Search (search.py) | ✅ Done |
 | 2 | Content extraction (extract.py) | ✅ Done |
-| 3 | State management (state.py) | 🔲 Pending |
-| 4 | Deduplication (dedup.py) | 🔲 Pending |
-| 5 | Summarization (summarize.py) | 🔲 Pending |
-| 6 | Delivery (deliver.py) | 🔲 Pending |
-| 7 | Orchestrator + CLI (main.py) | 🔲 Pending |
+| 3 | State management (state.py) | ✅ Done |
+| 4 | Deduplication (dedup.py) | ✅ Done |
+| 5 | Summarization (summarize.py) | ✅ Done |
+| 6 | Delivery (deliver.py) | ✅ Done |
+| 7 | Orchestrator + CLI (main.py) | ✅ Done |

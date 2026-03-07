@@ -138,9 +138,9 @@
 
 ---
 
-## Phase 7 — Orchestrator (main.py)
+## Phase 7 — Orchestrator (main.py) ✅
 
-- [ ] Implement `run_pipeline(config_path: str)` that executes the full flow:
+- [x] Implement `run_pipeline(config_path: str)` that executes the full flow:
   1. Load config and initialize DB
   2. Run search queries → get candidate URLs
   3. Extract content from URLs
@@ -149,13 +149,13 @@
   6. Summarize new items and generate digest
   7. Deliver digest
   8. Update state DB with all new items
-- [ ] Add CLI interface using `argparse`:
+- [x] Add CLI interface using `argparse`:
   - `redpill run` — execute the full pipeline once
   - `redpill run --dry-run` — do everything except deliver and update state (useful for testing)
   - `redpill history --last N` — show the last N digests
   - `redpill stats` — show total items seen, items per day average, top sources
-- [ ] Add proper error handling: if any step fails, log the error and continue with remaining items
-- [ ] Make the pipeline idempotent — safe to run multiple times in a day without duplicating
+- [x] Add proper error handling: if any step fails, log the error and continue with remaining items
+- [x] Make the pipeline idempotent — safe to run multiple times in a day without duplicating
 
 ---
 
