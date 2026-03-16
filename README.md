@@ -29,7 +29,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-Edit `config.yaml` with your topic and delivery settings. Add your `TAVILY_API_KEY` (and optionally `SMTP_PASSWORD`) to `.env`.
+Edit `config.yaml` with your topic and delivery settings. Fill in `.env` with your secrets — `.env.example` documents all available variables including `TAVILY_API_KEY`, `SMTP_PASSWORD`, and `HUGGINGFACE_HUB_VERBOSITY` (pre-set to silence a cosmetic HuggingFace auth warning for the public embedding model).
 
 ## Configuration
 
