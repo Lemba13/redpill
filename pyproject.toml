@@ -30,3 +30,6 @@ redpill = "redpill.main:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["redpill*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

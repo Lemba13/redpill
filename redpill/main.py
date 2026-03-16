@@ -33,9 +33,21 @@ from dotenv import load_dotenv
 from redpill.dedup import compute_embedding, filter_new_items
 from redpill.deliver import DeliveryError, deliver
 from redpill.extract import extract_batch
+from redpill.query_planner import plan_queries, plan_queries_fallback
 from redpill.search import search
-from redpill.state import DEFAULT_DB_PATH, add_item, init_db
+from redpill.state import (
+    DEFAULT_DB_PATH,
+    add_item,
+    get_query_performance,
+    get_recent_terms,
+    get_top_terms,
+    init_db,
+    log_query,
+    store_extracted_terms,
+    update_query_stats,
+)
 from redpill.summarize import OllamaClient, check_ollama, generate_digest, summarize_item
+from redpill.term_extractor import extract_terms_batch
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +167,8 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         order (``config.yaml`` then ``config.example.yaml``).
     dry_run:
         When True, the pipeline runs search → extract → dedup → summarize and
-        prints the digest to stdout, but skips delivery and state updates.
+        prints the digest to stdout, but skips delivery and state updates
+        (including query logging and term extraction).
         Useful for iterating on prompts and config without polluting the DB or
         sending emails.
     """
@@ -167,10 +180,14 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     config = _load_config(config_path)
 
     topic: str = config.get("topic", "")
-    queries: list[str] = config.get("search_queries", [])
+    static_queries: list[str] = config.get("search_queries", [])
     max_results: int = int(config.get("max_results_per_query", 10))
     threshold: float = float(config.get("dedup_similarity_threshold", 0.85))
     db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+
+    qp_cfg: dict = config.get("query_planning", {})
+    use_planner: bool = bool(qp_cfg.get("enabled", False))
+    max_queries: int = int(qp_cfg.get("max_queries", 5))
 
     ollama_cfg: dict = config.get("ollama_config", {})
     ollama_base_url: str = ollama_cfg.get("base_url", "http://localhost:11434")
@@ -180,8 +197,12 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         print("ERROR: 'topic' is required in config.", file=sys.stderr)
         sys.exit(1)
 
-    if not queries:
-        print("ERROR: 'search_queries' must be a non-empty list in config.", file=sys.stderr)
+    if not use_planner and not static_queries:
+        print(
+            "ERROR: 'search_queries' must be a non-empty list in config "
+            "(or set query_planning.enabled: true).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Ensure the data directory exists before init_db tries to create the file.
@@ -203,11 +224,52 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     llm_client = OllamaClient(base_url=ollama_base_url, model=ollama_model)
 
     # ------------------------------------------------------------------
-    # Step 2: Search
+    # Step 2: Plan queries
     # ------------------------------------------------------------------
-    logger.info("Running %d search queries for topic %r ...", len(queries), topic)
+    if use_planner:
+        logger.info("Query planning enabled (max_queries=%d) ...", max_queries)
+        planner_conn = sqlite3.connect(db_path)
+        planner_conn.row_factory = sqlite3.Row
+        try:
+            planned_queries = plan_queries(
+                topic, planner_conn, llm_client, max_queries=max_queries
+            )
+        except Exception as exc:
+            logger.warning("Query planner raised unexpectedly (%s) — using fallback", exc)
+            planned_queries = plan_queries_fallback(topic, planner_conn, max_queries=max_queries)
+        finally:
+            planner_conn.close()
+    else:
+        # Backward-compat: wrap static queries as plain base-source dicts.
+        planned_queries = [
+            {"query": q, "source": "base", "reasoning": "Static query from config."}
+            for q in static_queries
+        ]
+
+    query_strings: list[str] = [pq["query"] for pq in planned_queries]
+    logger.info(
+        "Running %d search quer%s for topic %r ...",
+        len(query_strings),
+        "y" if len(query_strings) == 1 else "ies",
+        topic,
+    )
+
+    # Log planned queries to the DB (skipped in dry-run).
+    query_ids: list[int] = []
+    if not dry_run:
+        for pq in planned_queries:
+            try:
+                qid = log_query(pq["query"], today, pq["source"], topic, db_path=db_path)
+                query_ids.append(qid)
+            except Exception as exc:
+                logger.warning("Failed to log query %r: %s", pq["query"], exc)
+                query_ids.append(-1)
+
+    # ------------------------------------------------------------------
+    # Step 3: Search
+    # ------------------------------------------------------------------
     try:
-        candidates = search(queries, max_results=max_results)
+        candidates = search(query_strings, max_results=max_results)
     except Exception as exc:
         logger.error("Search failed: %s", exc)
         print(f"ERROR: Search step failed: {exc}", file=sys.stderr)
@@ -221,7 +283,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         return
 
     # ------------------------------------------------------------------
-    # Step 3: Extract content
+    # Step 4: Extract content
     # ------------------------------------------------------------------
     urls = [c["url"] for c in candidates]
     logger.info("Extracting content from %d URL(s) ...", len(urls))
@@ -230,14 +292,26 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     merged = _merge_search_and_extract(candidates, extracted)
 
     # ------------------------------------------------------------------
-    # Step 4: Deduplicate
+    # Step 5: Deduplicate
     # ------------------------------------------------------------------
     logger.info("Running deduplication (threshold=%.2f) ...", threshold)
     new_items = filter_new_items(merged, db_path=db_path, threshold=threshold)
     logger.info("%d new item(s) after dedup", len(new_items))
 
+    # Update query log stats after dedup (best-effort).
+    if not dry_run and query_ids:
+        n_new = len(new_items)
+        n_results = len(candidates)
+        for qid in query_ids:
+            if qid < 0:
+                continue
+            try:
+                update_query_stats(qid, results_count=n_results, new_items=n_new, kept_items=0, db_path=db_path)
+            except Exception as exc:
+                logger.warning("Failed to update query stats for id=%d: %s", qid, exc)
+
     # ------------------------------------------------------------------
-    # Step 5: Nothing new?
+    # Step 6: Nothing new?
     # ------------------------------------------------------------------
     if not new_items:
         logger.info("All items were duplicates — nothing new today.")
@@ -245,7 +319,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         return
 
     # ------------------------------------------------------------------
-    # Step 6: Summarize
+    # Step 7: Summarize
     # ------------------------------------------------------------------
     logger.info("Summarizing %d item(s) ...", len(new_items))
     summarized: list[dict] = []
@@ -274,7 +348,42 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     digest = generate_digest(summarized, topic=topic, date=today)
 
     # ------------------------------------------------------------------
-    # Step 7: Deliver (skipped in dry-run mode)
+    # Step 7b: Extract terms (skipped in dry-run)
+    # ------------------------------------------------------------------
+    # Build a lookup from URL back to the merged item (needed both here and
+    # in the persist step below).
+    merged_by_url: dict[str, dict] = {m["url"]: m for m in merged}
+
+    if not dry_run:
+        # Combine relevance_score from summarized items with content/
+        # extraction_success from merged items so the batch filter works.
+        items_for_extraction: list[dict] = []
+        for s_item in summarized:
+            url = s_item.get("url", "")
+            m = merged_by_url.get(url, {})
+            items_for_extraction.append(
+                {
+                    **m,
+                    "relevance_score": s_item.get("relevance_score", 0),
+                }
+            )
+
+        logger.info("Running term extraction on %d summarized item(s) ...", len(items_for_extraction))
+        try:
+            extracted_terms = extract_terms_batch(items_for_extraction, topic, llm_client)
+        except Exception as exc:
+            logger.warning("Term extraction failed: %s — continuing without terms", exc)
+            extracted_terms = []
+
+        if extracted_terms:
+            logger.info("Storing %d extracted term(s) ...", len(extracted_terms))
+            try:
+                store_extracted_terms(extracted_terms, db_path=db_path)
+            except Exception as exc:
+                logger.warning("Failed to store extracted terms: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Step 8: Deliver (skipped in dry-run mode)
     # ------------------------------------------------------------------
     if dry_run:
         logger.info("Dry-run mode: printing digest to stdout, skipping delivery.")
@@ -291,13 +400,10 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
             sys.exit(1)
 
         # ------------------------------------------------------------------
-        # Step 8: Persist state
+        # Step 9: Persist state
         # ------------------------------------------------------------------
         logger.info("Persisting %d new item(s) to state DB ...", len(summarized))
-        # Build a lookup from URL back to the merged item so we can get
-        # the original content for hashing and embedding.
-        merged_by_url: dict[str, dict] = {m["url"]: m for m in merged}
-
+        n_kept = 0
         for s_item in summarized:
             url: str = s_item.get("url", "")
             original = merged_by_url.get(url, {})
@@ -320,6 +426,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
                     db_path=db_path,
                     first_seen_date=today,
                 )
+                n_kept += 1
                 logger.debug("Persisted: %r", url)
             except Exception as exc:
                 logger.warning(
@@ -327,6 +434,21 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
                     url,
                     exc,
                 )
+
+        # Final query stats update with kept_items count.
+        for qid in query_ids:
+            if qid < 0:
+                continue
+            try:
+                update_query_stats(
+                    qid,
+                    results_count=len(candidates),
+                    new_items=len(new_items),
+                    kept_items=n_kept,
+                    db_path=db_path,
+                )
+            except Exception as exc:
+                logger.warning("Failed to finalize query stats for id=%d: %s", qid, exc)
 
     logger.info("Pipeline complete.")
 
@@ -385,6 +507,52 @@ def _cmd_history(args: argparse.Namespace) -> None:
     print("\n---\n".join(parts))
 
 
+def _cmd_plan(args: argparse.Namespace) -> None:
+    """Handler for: redpill plan [--config PATH] [--max-queries N]."""
+    config = _load_config(args.config)
+
+    topic: str = config.get("topic", "")
+    if not topic:
+        print("ERROR: 'topic' is required in config.", file=sys.stderr)
+        sys.exit(1)
+
+    db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+    qp_cfg: dict = config.get("query_planning", {})
+    max_queries: int = args.max_queries or int(qp_cfg.get("max_queries", 5))
+
+    ollama_cfg: dict = config.get("ollama_config", {})
+    ollama_base_url: str = ollama_cfg.get("base_url", "http://localhost:11434")
+    ollama_model: str = ollama_cfg.get("model", "qwen3:4b")
+
+    # Ensure DB exists (may not if user hasn't run the pipeline yet).
+    db_dir = Path(db_path).parent
+    db_dir.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    try:
+        check_ollama(ollama_base_url, ollama_model)
+        llm_client = OllamaClient(base_url=ollama_base_url, model=ollama_model)
+    except RuntimeError as exc:
+        logger.warning("Ollama unavailable (%s) — using deterministic fallback.", exc)
+        llm_client = None  # type: ignore[assignment]
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if llm_client is not None:
+            queries = plan_queries(topic, conn, llm_client, max_queries=max_queries)
+        else:
+            queries = plan_queries_fallback(topic, conn, max_queries=max_queries)
+    finally:
+        conn.close()
+
+    print(f"Planned {len(queries)} query/ies for topic: {topic!r}\n")
+    for i, q in enumerate(queries, start=1):
+        print(f"  {i}. [{q['source']}] {q['query']}")
+        if q.get("reasoning"):
+            print(f"     → {q['reasoning']}")
+
+
 def _cmd_stats(args: argparse.Namespace) -> None:
     """Handler for: redpill stats [--config PATH]."""
     config = _load_config(args.config)
@@ -439,6 +607,74 @@ def _cmd_stats(args: argparse.Namespace) -> None:
     print("Top sources:")
     for domain, count in top_sources:
         print(f"  {count:>4}  {domain}")
+
+
+def _cmd_queries(args: argparse.Namespace) -> None:
+    """Handler for: redpill queries [--config PATH] [--last N]."""
+    config = _load_config(args.config)
+    db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+    topic: str = config.get("topic", "")
+
+    if not topic:
+        print("ERROR: 'topic' is required in config.", file=sys.stderr)
+        sys.exit(1)
+
+    if not Path(db_path).exists():
+        print(f"No database found at {db_path}. Run 'redpill run' first.")
+        return
+
+    rows = get_query_performance(topic, db_path=db_path, days=args.last)
+
+    if not rows:
+        print(f"No query history found for topic {topic!r} in the last {args.last} day(s).")
+        return
+
+    print(f"Query history for topic {topic!r} (last {args.last} day(s)):\n")
+    print(f"  {'Date':<12}  {'Source':<14}  {'Results':>7}  {'New':>5}  {'Kept':>5}  Query")
+    print(f"  {'-'*12}  {'-'*14}  {'-'*7}  {'-'*5}  {'-'*5}  {'-'*40}")
+    for r in rows:
+        print(
+            f"  {r['run_date']:<12}  {r['source']:<14}  "
+            f"{r['results_count']:>7}  {r['new_items']:>5}  {r['kept_items']:>5}  "
+            f"{r['query_text']}"
+        )
+
+
+def _cmd_terms(args: argparse.Namespace) -> None:
+    """Handler for: redpill terms [--config PATH] [--top N | --recent [DAYS]]."""
+    config = _load_config(args.config)
+    db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+    topic: str = config.get("topic", "")
+
+    if not topic:
+        print("ERROR: 'topic' is required in config.", file=sys.stderr)
+        sys.exit(1)
+
+    if not Path(db_path).exists():
+        print(f"No database found at {db_path}. Run 'redpill run' first.")
+        return
+
+    if args.recent is not None:
+        days = args.recent
+        rows = get_recent_terms(topic, db_path=db_path, days=days)
+        header = f"Terms seen in the last {days} day(s) for topic {topic!r}:"
+    else:
+        limit = args.top
+        rows = get_top_terms(topic, db_path=db_path, limit=limit)
+        header = f"Top {limit} terms for topic {topic!r} (all time):"
+
+    if not rows:
+        print(f"No terms found. Run 'redpill run' a few times to build up term history.")
+        return
+
+    print(f"{header}\n")
+    print(f"  {'Freq':>5}  {'Category':<12}  {'Last seen':<12}  Term")
+    print(f"  {'-'*5}  {'-'*12}  {'-'*12}  {'-'*40}")
+    for r in rows:
+        print(
+            f"  {r['frequency']:>5}  {(r['category'] or 'keyword'):<12}  "
+            f"{r['last_seen']:<12}  {r['term']}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +740,75 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to config YAML (default: config.yaml → config.example.yaml).",
     )
     stats_parser.set_defaults(func=_cmd_stats)
+
+    # --- redpill plan ---
+    plan_parser = subparsers.add_parser(
+        "plan",
+        help="Show what search queries the planner would generate (dry-run).",
+    )
+    plan_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to config YAML (default: config.yaml → config.example.yaml).",
+    )
+    plan_parser.add_argument(
+        "--max-queries",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override max queries (default: query_planning.max_queries from config or 5).",
+    )
+    plan_parser.set_defaults(func=_cmd_plan)
+
+    # --- redpill queries ---
+    queries_parser = subparsers.add_parser(
+        "queries",
+        help="Show query performance history.",
+    )
+    queries_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to config YAML (default: config.yaml → config.example.yaml).",
+    )
+    queries_parser.add_argument(
+        "--last",
+        type=int,
+        default=14,
+        metavar="DAYS",
+        help="How many days back to look (default: 14).",
+    )
+    queries_parser.set_defaults(func=_cmd_queries)
+
+    # --- redpill terms ---
+    terms_parser = subparsers.add_parser(
+        "terms",
+        help="Browse the extracted term database.",
+    )
+    terms_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to config YAML (default: config.yaml → config.example.yaml).",
+    )
+    _terms_group = terms_parser.add_mutually_exclusive_group()
+    _terms_group.add_argument(
+        "--top",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Show the N most frequent terms of all time (default: 20).",
+    )
+    _terms_group.add_argument(
+        "--recent",
+        type=int,
+        nargs="?",
+        const=30,
+        metavar="DAYS",
+        help="Show terms seen in the last DAYS days (default: 30 when flag is given).",
+    )
+    terms_parser.set_defaults(func=_cmd_terms)
 
     return parser
 

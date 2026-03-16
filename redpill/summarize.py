@@ -21,13 +21,13 @@ Public API:
         the summarized fields alongside the original 'url' key.
 """
 
-import json
 import logging
-import re
 from typing import Protocol, runtime_checkable
 
 import httpx
 import ollama
+
+from redpill.llm_utils import extract_json, strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "qwen3:4b"
 DEFAULT_BASE_URL = "http://localhost:11434"
-
-# Matches <think>...</think> blocks including newlines (non-greedy).
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 _SYSTEM_PROMPT = (
     "You are a focused research assistant. Your job is to read articles and "
@@ -248,53 +245,18 @@ def check_ollama(base_url: str = DEFAULT_BASE_URL, model: str = DEFAULT_MODEL) -
 # ---------------------------------------------------------------------------
 
 
-def _strip_think_blocks(text: str) -> str:
-    """Remove <think>...</think> sections that qwen3 models emit before their
-    actual response.
-
-    The regex is non-greedy and DOTALL so it handles multi-line think blocks
-    correctly. Multiple blocks are all removed.
-    """
-    return _THINK_BLOCK_RE.sub("", text)
-
-
 def _extract_json(raw: str) -> dict:
-    """Parse JSON from a raw LLM response string.
+    """Parse a JSON object from a raw LLM response.
 
-    Strategy:
-    1. Strip any <think>...</think> blocks.
-    2. Strip leading/trailing whitespace.
-    3. Attempt direct json.loads().
-    4. If that fails, look for the first '{' and last '}' and try again —
-       handles models that prepend/append text outside the JSON object.
-
-    Returns the parsed dict, or an empty dict on complete failure (so callers
-    can decide on a fallback without catching exceptions).
+    Delegates to llm_utils.extract_json and enforces that the result is a
+    dict.  Returns an empty dict on failure so callers always get a consistent
+    type.
     """
-    text = _strip_think_blocks(raw).strip()
-
-    # Attempt 1: clean JSON — also guard against the model returning a JSON
-    # array or scalar instead of an object.
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    # Attempt 2: locate outermost braces — handles models that prepend/append
-    # stray text around an otherwise valid JSON object.
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            parsed = json.loads(text[start : end + 1])
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-    logger.warning("_extract_json: failed to parse JSON from LLM response: %r", text[:200])
+    parsed = extract_json(raw)
+    if isinstance(parsed, dict):
+        return parsed
+    if parsed is not None:
+        logger.warning("_extract_json: expected dict, got %s — ignoring", type(parsed).__name__)
     return {}
 
 
