@@ -23,12 +23,12 @@ import httpx
 import ollama
 import pytest
 
+from redpill.llm_utils import strip_think_blocks as _strip_think_blocks
 from redpill.summarize import (
     LLMClient,
     OllamaClient,
     _build_summarize_prompt,
     _extract_json,
-    _strip_think_blocks,
     _validate_summary,
     check_ollama,
     generate_digest,

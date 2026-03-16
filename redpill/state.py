@@ -1,7 +1,10 @@
 """
-state.py — SQLite-backed state management for seen items.
+state.py — SQLite-backed state management for seen items, extracted terms,
+and query logs.
 
-Table: seen_items
+Tables
+------
+seen_items:
     id              INTEGER PRIMARY KEY AUTOINCREMENT
     url             TEXT UNIQUE
     title           TEXT
@@ -10,6 +13,28 @@ Table: seen_items
     summary         TEXT
     first_seen_date TEXT   (ISO format)
     topic           TEXT
+
+extracted_terms:
+    id              INTEGER PRIMARY KEY AUTOINCREMENT
+    term            TEXT NOT NULL
+    source_url      TEXT
+    source_title    TEXT
+    topic           TEXT NOT NULL
+    category        TEXT        -- subtopic|technique|author|dataset|framework|keyword
+    first_seen      DATE NOT NULL
+    frequency       INTEGER DEFAULT 1
+    last_seen       DATE NOT NULL
+    UNIQUE(term, topic)
+
+query_log:
+    id              INTEGER PRIMARY KEY AUTOINCREMENT
+    query_text      TEXT NOT NULL
+    run_date        DATE NOT NULL
+    source          TEXT NOT NULL   -- base|extracted_term|llm_planned
+    topic           TEXT NOT NULL
+    results_count   INTEGER DEFAULT 0
+    new_items       INTEGER DEFAULT 0
+    kept_items      INTEGER DEFAULT 0
 
 Embedding serialization format (all fields packed via struct.pack):
     [4 bytes: dtype_len (uint32 big-endian)]
@@ -24,20 +49,32 @@ Public API:
     get_all_embeddings(db_path: str) -> list[tuple[int, np.ndarray]]
     add_item(url, title, content_hash, embedding, summary, topic, db_path) -> None
     get_items_since(date: str, db_path: str) -> list[dict]
+    store_extracted_terms(terms: list[dict], db_path: str) -> None
+    get_recent_terms(topic: str, db_path: str, days: int = 30) -> list[dict]
+    get_top_terms(topic: str, db_path: str, limit: int = 50) -> list[dict]
+    log_query(query_text: str, run_date: str, source: str, topic: str, db_path: str) -> int
+    update_query_stats(query_id: int, results_count: int, new_items: int, kept_items: int, db_path: str) -> None
+    get_query_performance(topic: str, db_path: str, days: int = 14) -> list[dict]
 
 Internal (for testing with an in-memory connection):
-    init_db_conn(conn: sqlite3.Connection) -> None
-    is_url_seen_conn(url: str, conn: sqlite3.Connection) -> bool
-    get_all_embeddings_conn(conn: sqlite3.Connection) -> list[tuple[int, np.ndarray]]
+    init_db_conn(conn) -> None
+    is_url_seen_conn(url, conn) -> bool
+    get_all_embeddings_conn(conn) -> list[tuple[int, np.ndarray]]
     add_item_conn(url, title, content_hash, embedding, summary, topic, conn) -> None
-    get_items_since_conn(date: str, conn: sqlite3.Connection) -> list[dict]
+    get_items_since_conn(date, conn) -> list[dict]
+    store_extracted_terms_conn(terms, conn) -> None
+    get_recent_terms_conn(topic, days, conn) -> list[dict]
+    get_top_terms_conn(topic, limit, conn) -> list[dict]
+    log_query_conn(query_text, run_date, source, topic, conn) -> int
+    update_query_stats_conn(query_id, results_count, new_items, kept_items, conn) -> None
+    get_query_performance_conn(topic, days, conn) -> list[dict]
 """
 
 import logging
 import sqlite3
 import struct
 from contextlib import contextmanager
-from datetime import date as _date
+from datetime import date as _date, timedelta
 from typing import Generator
 
 import numpy as np
@@ -46,7 +83,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "data/redpill.db"
 
-_CREATE_TABLE_SQL = """
+_CREATE_SEEN_ITEMS_SQL = """
 CREATE TABLE IF NOT EXISTS seen_items (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     url             TEXT UNIQUE NOT NULL,
@@ -58,6 +95,37 @@ CREATE TABLE IF NOT EXISTS seen_items (
     topic           TEXT NOT NULL DEFAULT ''
 )
 """
+
+_CREATE_EXTRACTED_TERMS_SQL = """
+CREATE TABLE IF NOT EXISTS extracted_terms (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    term            TEXT NOT NULL,
+    source_url      TEXT,
+    source_title    TEXT,
+    topic           TEXT NOT NULL,
+    category        TEXT,
+    first_seen      DATE NOT NULL,
+    frequency       INTEGER NOT NULL DEFAULT 1,
+    last_seen       DATE NOT NULL,
+    UNIQUE(term, topic)
+)
+"""
+
+_CREATE_QUERY_LOG_SQL = """
+CREATE TABLE IF NOT EXISTS query_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_text      TEXT NOT NULL,
+    run_date        DATE NOT NULL,
+    source          TEXT NOT NULL,
+    topic           TEXT NOT NULL,
+    results_count   INTEGER NOT NULL DEFAULT 0,
+    new_items       INTEGER NOT NULL DEFAULT 0,
+    kept_items      INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+# Keep the old name as an alias so existing callers (init_db_conn) are not broken
+_CREATE_TABLE_SQL = _CREATE_SEEN_ITEMS_SQL
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +212,16 @@ def _open_conn(db_path: str) -> Generator[sqlite3.Connection, None, None]:
 # ---------------------------------------------------------------------------
 
 def init_db_conn(conn: sqlite3.Connection) -> None:
-    """Create the seen_items table if it does not already exist.
+    """Create all tables if they do not already exist.
 
+    Safe to call on an existing database — all statements use
+    CREATE TABLE IF NOT EXISTS, so no data is dropped on re-init.
     Does not commit — callers (or _open_conn) are responsible for commit/rollback.
     """
-    conn.execute(_CREATE_TABLE_SQL)
-    logger.debug("seen_items table initialised (or already exists)")
+    conn.execute(_CREATE_SEEN_ITEMS_SQL)
+    conn.execute(_CREATE_EXTRACTED_TERMS_SQL)
+    conn.execute(_CREATE_QUERY_LOG_SQL)
+    logger.debug("All tables initialised (or already exist)")
 
 
 def is_url_seen_conn(url: str, conn: sqlite3.Connection) -> bool:
@@ -250,7 +322,7 @@ def get_items_since_conn(
 # ---------------------------------------------------------------------------
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
-    """Create the SQLite database and seen_items table if they do not exist."""
+    """Create the SQLite database and all tables if they do not exist."""
     with _open_conn(db_path) as conn:
         init_db_conn(conn)
 
@@ -293,3 +365,270 @@ def get_items_since(
     """Return all items first seen on or after the given ISO date string."""
     with _open_conn(db_path) as conn:
         return get_items_since_conn(date, conn)
+
+
+# ---------------------------------------------------------------------------
+# extracted_terms — internal implementations
+# ---------------------------------------------------------------------------
+
+def store_extracted_terms_conn(
+    terms: list[dict],
+    conn: sqlite3.Connection,
+) -> None:
+    """Upsert a list of extracted term dicts into the extracted_terms table.
+
+    Each dict must have: ``term``, ``topic``, ``first_seen`` (ISO date string),
+    ``last_seen`` (ISO date string).  Optional fields: ``source_url``,
+    ``source_title``, ``category``.
+
+    On conflict (same term + topic already exists): increment frequency and
+    update last_seen.  The source_url and source_title are updated only when
+    the new values are non-NULL (preserves the earliest source on re-runs).
+    """
+    today = _date.today().isoformat()
+    for term_dict in terms:
+        term = term_dict.get("term", "")
+        topic = term_dict.get("topic", "")
+        if not term or not topic:
+            logger.warning("store_extracted_terms_conn: skipping term with missing term or topic: %r", term_dict)
+            continue
+        conn.execute(
+            """
+            INSERT INTO extracted_terms
+                (term, source_url, source_title, topic, category, first_seen, frequency, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(term, topic) DO UPDATE SET
+                frequency    = frequency + 1,
+                last_seen    = excluded.last_seen,
+                source_url   = COALESCE(excluded.source_url, source_url),
+                source_title = COALESCE(excluded.source_title, source_title)
+            """,
+            (
+                term,
+                term_dict.get("source_url"),
+                term_dict.get("source_title"),
+                topic,
+                term_dict.get("category"),
+                term_dict.get("first_seen", today),
+                term_dict.get("last_seen", today),
+            ),
+        )
+    logger.debug("store_extracted_terms_conn: upserted %d term(s)", len(terms))
+
+
+def get_recent_terms_conn(
+    topic: str,
+    days: int,
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return terms for *topic* seen within the last *days* days.
+
+    Results are sorted by frequency descending, then term ascending.
+    """
+    cutoff = (_date.today() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT id, term, source_url, source_title, topic, category,
+               first_seen, frequency, last_seen
+        FROM extracted_terms
+        WHERE topic = ? AND last_seen >= ?
+        ORDER BY frequency DESC, term ASC
+        """,
+        (topic, cutoff),
+    ).fetchall()
+    result = [dict(row) for row in rows]
+    logger.debug("get_recent_terms_conn(topic=%r, days=%d): %d term(s)", topic, days, len(result))
+    return result
+
+
+def get_top_terms_conn(
+    topic: str,
+    limit: int,
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return the *limit* most frequent terms for *topic* across all time.
+
+    Results are sorted by frequency descending, then term ascending.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, term, source_url, source_title, topic, category,
+               first_seen, frequency, last_seen
+        FROM extracted_terms
+        WHERE topic = ?
+        ORDER BY frequency DESC, term ASC
+        LIMIT ?
+        """,
+        (topic, limit),
+    ).fetchall()
+    result = [dict(row) for row in rows]
+    logger.debug("get_top_terms_conn(topic=%r, limit=%d): %d term(s)", topic, limit, len(result))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# query_log — internal implementations
+# ---------------------------------------------------------------------------
+
+def log_query_conn(
+    query_text: str,
+    run_date: str,
+    source: str,
+    topic: str,
+    conn: sqlite3.Connection,
+) -> int:
+    """Insert a new query log entry and return its row id.
+
+    Parameters
+    ----------
+    query_text:
+        The search query string.
+    run_date:
+        ISO date of the pipeline run (e.g. "2026-03-15").
+    source:
+        One of: "base", "extracted_term", "llm_planned".
+    topic:
+        The topic this query belongs to (used for per-topic filtering).
+
+    Returns
+    -------
+    The ``id`` of the newly inserted row (sqlite3 lastrowid).
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO query_log (query_text, run_date, source, topic)
+        VALUES (?, ?, ?, ?)
+        """,
+        (query_text, run_date, source, topic),
+    )
+    row_id: int = cursor.lastrowid  # type: ignore[assignment]
+    logger.debug("log_query_conn: logged query %r → id=%d", query_text, row_id)
+    return row_id
+
+
+def update_query_stats_conn(
+    query_id: int,
+    results_count: int,
+    new_items: int,
+    kept_items: int,
+    conn: sqlite3.Connection,
+) -> None:
+    """Update the stats columns for an existing query_log row.
+
+    Parameters
+    ----------
+    query_id:
+        The id returned by log_query_conn.
+    results_count:
+        Total raw results the query returned from Tavily.
+    new_items:
+        How many survived deduplication.
+    kept_items:
+        How many made it into the final digest.
+    """
+    conn.execute(
+        """
+        UPDATE query_log
+        SET results_count = ?, new_items = ?, kept_items = ?
+        WHERE id = ?
+        """,
+        (results_count, new_items, kept_items, query_id),
+    )
+    logger.debug(
+        "update_query_stats_conn: id=%d results=%d new=%d kept=%d",
+        query_id, results_count, new_items, kept_items,
+    )
+
+
+def get_query_performance_conn(
+    topic: str,
+    days: int,
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return query log entries for *topic* within the last *days* days.
+
+    Ordered by run_date descending, then id descending (most recent first).
+    """
+    cutoff = (_date.today() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT id, query_text, run_date, source, topic,
+               results_count, new_items, kept_items
+        FROM query_log
+        WHERE topic = ? AND run_date >= ?
+        ORDER BY run_date DESC, id DESC
+        """,
+        (topic, cutoff),
+    ).fetchall()
+    result = [dict(row) for row in rows]
+    logger.debug(
+        "get_query_performance_conn(topic=%r, days=%d): %d entries", topic, days, len(result)
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# extracted_terms + query_log — public API (db_path-based)
+# ---------------------------------------------------------------------------
+
+def store_extracted_terms(
+    terms: list[dict],
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    """Upsert extracted terms into the database. See store_extracted_terms_conn."""
+    with _open_conn(db_path) as conn:
+        store_extracted_terms_conn(terms, conn)
+
+
+def get_recent_terms(
+    topic: str,
+    db_path: str = DEFAULT_DB_PATH,
+    days: int = 30,
+) -> list[dict]:
+    """Return terms for *topic* seen in the last *days* days."""
+    with _open_conn(db_path) as conn:
+        return get_recent_terms_conn(topic, days, conn)
+
+
+def get_top_terms(
+    topic: str,
+    db_path: str = DEFAULT_DB_PATH,
+    limit: int = 50,
+) -> list[dict]:
+    """Return the top *limit* most frequent terms for *topic*."""
+    with _open_conn(db_path) as conn:
+        return get_top_terms_conn(topic, limit, conn)
+
+
+def log_query(
+    query_text: str,
+    run_date: str,
+    source: str,
+    topic: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> int:
+    """Insert a query log entry and return its id."""
+    with _open_conn(db_path) as conn:
+        return log_query_conn(query_text, run_date, source, topic, conn)
+
+
+def update_query_stats(
+    query_id: int,
+    results_count: int,
+    new_items: int,
+    kept_items: int,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    """Update stats on an existing query_log row."""
+    with _open_conn(db_path) as conn:
+        update_query_stats_conn(query_id, results_count, new_items, kept_items, conn)
+
+
+def get_query_performance(
+    topic: str,
+    db_path: str = DEFAULT_DB_PATH,
+    days: int = 14,
+) -> list[dict]:
+    """Return query log entries for *topic* within the last *days* days."""
+    with _open_conn(db_path) as conn:
+        return get_query_performance_conn(topic, days, conn)

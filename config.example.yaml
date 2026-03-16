@@ -2,6 +2,8 @@
 
 topic: "contrastive learning"
 
+# Static queries — used when query_planning.enabled is false (the default).
+# Once you have a few runs of term history, enable the planner below instead.
 search_queries:
   - "contrastive learning 2026"
   - "contrastive learning new paper"
@@ -11,17 +13,24 @@ max_results_per_query: 10
 
 dedup_similarity_threshold: 0.85
 
-# "markdown" writes to data/digests/YYYY-MM-DD.md
-# "email" sends via SMTP (requires email_config below)
-delivery_method: "markdown"
+db_path: "data/redpill.db"
 
-llm_provider: "ollama"  # "ollama" | "anthropic" | "openai"
+# "markdown" writes to data/digests/YYYY-MM-DD.md
+# "email"    sends via SMTP (requires email_config below)
+delivery_method: "markdown"
 
 ollama_config:
   base_url: "http://localhost:11434"
-  model: "qwen3.5:4b"  # e.g. "mistral", "llama3.1"
+  model: "llama3.1:8b"  # e.g. "qwen3:4b", "mistral"
 
 embedding_model: "all-MiniLM-L6-v2"
+
+# Query planning — uses term history from prior runs to generate targeted queries.
+# Set enabled: true after a few runs have built up term history.
+# When enabled, search_queries above is ignored.
+query_planning:
+  enabled: false
+  max_queries: 5
 
 # Required only if delivery_method is "email"
 email_config:

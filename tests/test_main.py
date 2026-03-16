@@ -33,8 +33,10 @@ import yaml
 from redpill.main import (
     _build_parser,
     _cmd_history,
+    _cmd_queries,
     _cmd_run,
     _cmd_stats,
+    _cmd_terms,
     _content_hash,
     _load_config,
     _maybe_deliver_nothing_new,
@@ -937,6 +939,193 @@ class TestBuildParser:
         parser = _build_parser()
         args = parser.parse_args(["stats"])
         assert callable(args.func)
+
+    def test_plan_subcommand_exists(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["plan"])
+        assert args.command == "plan"
+
+    def test_plan_max_queries_defaults_none(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["plan"])
+        assert args.max_queries is None
+
+    def test_plan_max_queries_can_be_set(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["plan", "--max-queries", "7"])
+        assert args.max_queries == 7
+
+    def test_queries_subcommand_exists(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["queries"])
+        assert args.command == "queries"
+
+    def test_queries_last_defaults_14(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["queries"])
+        assert args.last == 14
+
+    def test_queries_last_can_be_set(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["queries", "--last", "30"])
+        assert args.last == 30
+
+    def test_queries_has_func_attribute(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["queries"])
+        assert callable(args.func)
+
+    def test_terms_subcommand_exists(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["terms"])
+        assert args.command == "terms"
+
+    def test_terms_top_defaults_20(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["terms"])
+        assert args.top == 20
+
+    def test_terms_top_can_be_set(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["terms", "--top", "50"])
+        assert args.top == 50
+
+    def test_terms_recent_flag_defaults_30_when_no_value(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["terms", "--recent"])
+        assert args.recent == 30
+
+    def test_terms_recent_accepts_explicit_days(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["terms", "--recent", "7"])
+        assert args.recent == 7
+
+    def test_terms_top_and_recent_mutually_exclusive(self) -> None:
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["terms", "--top", "10", "--recent", "7"])
+
+    def test_terms_has_func_attribute(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["terms"])
+        assert callable(args.func)
+
+
+# ---------------------------------------------------------------------------
+# TestCmdQueries
+# ---------------------------------------------------------------------------
+
+
+class TestCmdQueries:
+    def _make_args(self, config: str, last: int = 14) -> argparse.Namespace:
+        return argparse.Namespace(config=config, last=last)
+
+    def test_no_db_prints_message(self, tmp_path: Path, capsys) -> None:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({**SAMPLE_CONFIG, "db_path": str(tmp_path / "missing.db")}))
+        _cmd_queries(self._make_args(str(cfg)))
+        out = capsys.readouterr().out
+        assert "No database found" in out
+
+    def test_empty_history_prints_message(self, tmp_path: Path, capsys) -> None:
+        db_path = str(tmp_path / "test.db")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({**SAMPLE_CONFIG, "db_path": db_path}))
+        # Create the DB so the "no db" check passes, but leave query_log empty.
+        from redpill.state import init_db
+        init_db(db_path)
+        _cmd_queries(self._make_args(str(cfg)))
+        out = capsys.readouterr().out
+        assert "No query history" in out
+
+    def test_shows_query_rows(self, tmp_path: Path, capsys) -> None:
+        db_path = str(tmp_path / "test.db")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({**SAMPLE_CONFIG, "db_path": db_path}))
+        from redpill.state import init_db, log_query, update_query_stats
+        init_db(db_path)
+        from datetime import date
+        today = date.today().isoformat()
+        qid = log_query("contrastive learning SimCLR", today, "llm_planned",
+                        "contrastive learning", db_path=db_path)
+        update_query_stats(qid, 10, 4, 2, db_path=db_path)
+        _cmd_queries(self._make_args(str(cfg)))
+        out = capsys.readouterr().out
+        assert "contrastive learning SimCLR" in out
+        assert "llm_planned" in out
+
+    def test_missing_topic_exits(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({"search_queries": ["q"]}))
+        with pytest.raises(SystemExit):
+            _cmd_queries(self._make_args(str(cfg)))
+
+
+# ---------------------------------------------------------------------------
+# TestCmdTerms
+# ---------------------------------------------------------------------------
+
+
+class TestCmdTerms:
+    def _make_args(self, config: str, top: int = 20, recent=None) -> argparse.Namespace:
+        return argparse.Namespace(config=config, top=top, recent=recent)
+
+    def test_no_db_prints_message(self, tmp_path: Path, capsys) -> None:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({**SAMPLE_CONFIG, "db_path": str(tmp_path / "missing.db")}))
+        _cmd_terms(self._make_args(str(cfg)))
+        out = capsys.readouterr().out
+        assert "No database found" in out
+
+    def test_empty_terms_prints_message(self, tmp_path: Path, capsys) -> None:
+        db_path = str(tmp_path / "test.db")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({**SAMPLE_CONFIG, "db_path": db_path}))
+        from redpill.state import init_db
+        init_db(db_path)
+        _cmd_terms(self._make_args(str(cfg)))
+        out = capsys.readouterr().out
+        assert "No terms found" in out
+
+    def test_shows_top_terms(self, tmp_path: Path, capsys) -> None:
+        db_path = str(tmp_path / "test.db")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({**SAMPLE_CONFIG, "db_path": db_path}))
+        from datetime import date
+        from redpill.state import init_db, store_extracted_terms
+        init_db(db_path)
+        today = date.today().isoformat()
+        store_extracted_terms([
+            {"term": "SimCLR", "topic": "contrastive learning", "category": "technique",
+             "first_seen": today, "last_seen": today},
+        ], db_path=db_path)
+        _cmd_terms(self._make_args(str(cfg), top=5))
+        out = capsys.readouterr().out
+        assert "SimCLR" in out
+        assert "technique" in out
+
+    def test_recent_flag_uses_get_recent_terms(self, tmp_path: Path, capsys) -> None:
+        db_path = str(tmp_path / "test.db")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({**SAMPLE_CONFIG, "db_path": db_path}))
+        from datetime import date
+        from redpill.state import init_db, store_extracted_terms
+        init_db(db_path)
+        today = date.today().isoformat()
+        store_extracted_terms([
+            {"term": "MoCo", "topic": "contrastive learning", "category": "framework",
+             "first_seen": today, "last_seen": today},
+        ], db_path=db_path)
+        _cmd_terms(self._make_args(str(cfg), recent=30))
+        out = capsys.readouterr().out
+        assert "MoCo" in out
+        assert "last 30 day" in out
+
+    def test_missing_topic_exits(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.dump({"search_queries": ["q"]}))
+        with pytest.raises(SystemExit):
+            _cmd_terms(self._make_args(str(cfg)))
 
 
 # ---------------------------------------------------------------------------
