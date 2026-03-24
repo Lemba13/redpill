@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-smoke_test.py — End-to-end smoke test for the v2 pipeline.
+smoke_test.py — End-to-end smoke test for the v3 pipeline.
 
 Tests the full feedback loop without any real API calls or disk state:
-  1. State.py — new tables and APIs
+  1. State.py — new tables and APIs (including research_plans)
   2. LLM utils — JSON parsing
   3. Term extractor — extraction + filtering
   4. Query planner — LLM path, fallback path, no-history path
   5. Full pipeline integration — two consecutive "runs" via an in-memory DB,
      verifying that terms extracted in run 1 influence queries in run 2
+  6. CLI commands — queries and terms
+  7. v3: research_plans table, PlannerLLMClient, two-stage planning
 
 Run with:
     python smoke_test.py
@@ -432,6 +434,119 @@ with tempfile.TemporaryDirectory() as tmpdir:
     out = buf.getvalue()
     check("terms --recent: shows terms", "SimCLR" in out)
     check("terms --recent: header mentions days", "30 day" in out)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. v3 — research_plans table + PlannerLLMClient + two-stage planning
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("7. v3 — research_plans, PlannerLLMClient, two-stage planning")
+
+from redpill.state import (
+    get_latest_research_plan_conn,
+    save_research_plan_conn,
+)
+from redpill.summarize import PlannerLLMClient
+from redpill.query_planner import decompose_topic, synthesize_queries
+
+conn_v3 = _fresh_conn()
+
+# research_plans table exists
+row = conn_v3.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='research_plans'"
+).fetchone()
+check("table 'research_plans' exists", row is not None)
+
+# save and retrieve a plan
+sample_plan = {
+    "dimensions": [
+        {
+            "name": "hard negative mining",
+            "description": "Methods for informative negatives.",
+            "priority": "high",
+            "coverage": "under-explored",
+            "suggested_queries": ["hard negative mining contrastive 2026"],
+        },
+        {
+            "name": "self-supervised benchmarks",
+            "description": "Benchmark comparisons.",
+            "priority": "medium",
+            "coverage": "partially-covered",
+            "suggested_queries": ["self-supervised benchmark results"],
+        },
+    ],
+    "dropped_dimensions": [],
+    "new_directions": ["Emerging audio contrastive work."],
+}
+save_research_plan_conn(TOPIC, TODAY, sample_plan, conn_v3, reasoning_trace="I reasoned.", source="llm")
+conn_v3.commit()
+
+retrieved = get_latest_research_plan_conn(TOPIC, conn_v3)
+check("save/retrieve research plan works", retrieved is not None)
+check("plan source stored correctly", retrieved["source"] == "llm")
+check("reasoning trace stored", retrieved["reasoning_trace"] == "I reasoned.")
+parsed_plan = json.loads(retrieved["plan_json"])
+check("plan dimensions preserved", len(parsed_plan["dimensions"]) == 2)
+
+# synthesize_queries from plan
+synthesized = synthesize_queries(sample_plan, TOPIC, max_queries=4)
+check("synthesize_queries returns list", isinstance(synthesized, list))
+check("synthesize_queries respects max_queries (3 budget: 4-1)", len(synthesized) <= 3)
+check("synthesize_queries all have llm_planned source",
+      all(q["source"] == "llm_planned" for q in synthesized))
+check("high-priority dimension first",
+      len(synthesized) > 0 and "hard negative" in synthesized[0]["query"].lower(),
+      f"first query: {synthesized[0]['query'] if synthesized else '(none)'!r}")
+
+# PlannerLLMClient construction
+planner = PlannerLLMClient(base_url="http://localhost:11434", model="qwen3.5:4b", think=True)
+check("PlannerLLMClient constructed", planner is not None)
+check("PlannerLLMClient has last_thinking=None", planner.last_thinking is None)
+check("PlannerLLMClient think=True", planner._think is True)
+
+# PlannerLLMClient is LLMClient
+from redpill.summarize import LLMClient
+check("PlannerLLMClient satisfies LLMClient protocol", isinstance(planner, LLMClient))
+
+# Two-stage integration: plan_queries with PlannerLLMClient spec mock
+planner_spec_mock = MagicMock(spec=PlannerLLMClient)
+planner_spec_mock.generate.return_value = json.dumps(sample_plan)
+planner_spec_mock.last_thinking = "chain of thought"
+planner_spec_mock._model = "qwen3.5:4b"
+
+# Populate terms so single-stage path isn't triggered on empty DB
+store_extracted_terms_conn([
+    {"term": "SimCLR", "topic": TOPIC, "category": "technique", "first_seen": TODAY, "last_seen": TODAY},
+], conn_v3)
+conn_v3.commit()
+
+from redpill.query_planner import plan_queries as _plan_queries_v3
+two_stage_result = _plan_queries_v3(TOPIC, conn_v3, planner_spec_mock, max_queries=4)
+check("two-stage: base query first", two_stage_result[0]["source"] == "base")
+check("two-stage: llm_planned queries present",
+      any(q["source"] == "llm_planned" for q in two_stage_result),
+      f"sources: {[q['source'] for q in two_stage_result]}")
+check("two-stage: max_queries respected", len(two_stage_result) <= 4)
+
+# Plan was saved to DB
+conn_v3.commit()
+saved = get_latest_research_plan_conn(TOPIC, conn_v3)
+check("two-stage: research plan saved to DB", saved is not None, f"got: {saved!r}")
+
+# Fallback plan saved when LLM fails
+conn_v3_fb = _fresh_conn()
+failing_planner = MagicMock(spec=PlannerLLMClient)
+failing_planner.generate.side_effect = RuntimeError("model offline")
+failing_planner.last_thinking = None
+fallback_result = _plan_queries_v3(TOPIC, conn_v3_fb, failing_planner, max_queries=3)
+conn_v3_fb.commit()
+check("two-stage fallback: base query still first", fallback_result[0]["source"] == "base")
+fallback_plan_row = get_latest_research_plan_conn(TOPIC, conn_v3_fb)
+check("two-stage fallback: fallback plan saved to DB", fallback_plan_row is not None)
+if fallback_plan_row:
+    check("two-stage fallback: source=fallback", fallback_plan_row["source"] == "fallback")
+
+conn_v3.close()
+conn_v3_fb.close()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

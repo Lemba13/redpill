@@ -159,6 +159,7 @@ class OllamaClient:
             response: ollama.ChatResponse = self._client.chat(
                 model=self._model,
                 messages=messages,
+                options={"num_predict": -1},
             )
         except ollama.RequestError as exc:
             raise RuntimeError(f"Ollama request error: {exc}") from exc
@@ -173,6 +174,125 @@ class OllamaClient:
 
         content: str = response.message.content or ""
         logger.debug("OllamaClient.generate: received %d chars", len(content))
+        return content
+
+
+class PlannerLLMClient:
+    """LLM client for the research planner — uses a reasoning model with think=True.
+
+    This client is intentionally separate from OllamaClient because it:
+    - Uses a different model (typically a reasoning model like qwen3.5:4b)
+    - Enables extended thinking via ``think=True`` in the Ollama API call
+    - Has a longer timeout (reasoning can take 30-60s on a 4b model)
+    - Captures and exposes the thinking/reasoning trace separately
+
+    After calling ``generate()``, the reasoning trace is available via the
+    ``last_thinking`` attribute.  It is reset to None before each call.
+
+    Parameters
+    ----------
+    base_url:
+        URL of the Ollama HTTP API.
+    model:
+        Name of the reasoning model to use (e.g. "qwen3.5:4b").
+    think:
+        Whether to enable extended thinking mode.  Default True.
+    timeout:
+        Request timeout in seconds.  Reasoning models are slow — default 120s.
+    num_ctx:
+        Context window size for the Ollama call.  Default 8192.
+    """
+
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        model: str = "qwen3.5:4b",
+        think: bool = True,
+        timeout: int = 120,
+        num_ctx: int = 8192,
+    ) -> None:
+        self._model = model
+        self._base_url = base_url
+        self._think = think
+        self._timeout = timeout
+        self._num_ctx = num_ctx
+        self._client = ollama.Client(host=base_url, timeout=timeout)
+        self.last_thinking: str | None = None
+
+    def generate(self, prompt: str, system: str | None = None) -> str:
+        """Call the reasoning model and return the final answer content.
+
+        When think=True, the model produces a <think>...</think> block before
+        its answer. Ollama exposes this via ``response.message.thinking`` when
+        the ``think`` parameter is passed. If that attribute is unavailable
+        (older Ollama version), the thinking trace is extracted from the raw
+        content via llm_utils.strip_think_blocks() as a fallback.
+
+        The reasoning trace is stored in ``self.last_thinking`` after each call.
+
+        Raises RuntimeError on any connection, timeout, or Ollama API failure.
+        """
+        from redpill.llm_utils import strip_think_blocks
+
+        self.last_thinking = None
+
+        messages: list[dict] = []
+        if system is not None:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        logger.debug(
+            "PlannerLLMClient.generate: model=%r think=%s prompt_len=%d",
+            self._model,
+            self._think,
+            len(prompt),
+        )
+
+        try:
+            kwargs: dict = {
+                "model": self._model,
+                "messages": messages,
+                "format": "json",
+                "options": {"num_ctx": self._num_ctx},
+            }
+            if self._think:
+                kwargs["think"] = True
+
+            response: ollama.ChatResponse = self._client.chat(**kwargs)
+        except ollama.RequestError as exc:
+            raise RuntimeError(f"PlannerLLM Ollama request error: {exc}") from exc
+        except ollama.ResponseError as exc:
+            raise RuntimeError(f"PlannerLLM Ollama response error: {exc}") from exc
+        except httpx.ConnectError as exc:
+            raise RuntimeError(
+                f"PlannerLLM: cannot connect to Ollama at {self._base_url}: {exc}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                f"PlannerLLM: Ollama request timed out after {self._timeout}s: {exc}"
+            ) from exc
+
+        content: str = response.message.content or ""
+
+        # Capture reasoning trace. Ollama exposes it as response.message.thinking
+        # when think=True was passed and the model supports it.  Fall back to
+        # extracting the <think>...</think> block from content if the attribute
+        # is absent or None (compatibility with older Ollama versions).
+        thinking: str | None = getattr(response.message, "thinking", None)
+        if thinking:
+            self.last_thinking = thinking
+        elif self._think and "<think>" in content:
+            import re as _re
+            m = _re.search(r"<think>(.*?)</think>", content, _re.DOTALL)
+            if m:
+                self.last_thinking = m.group(1).strip()
+            content = strip_think_blocks(content).strip()
+
+        logger.debug(
+            "PlannerLLMClient.generate: received %d chars (thinking=%s)",
+            len(content),
+            "yes" if self.last_thinking else "no",
+        )
         return content
 
 
