@@ -17,7 +17,9 @@ An autonomous agent that crawls the web daily for a given topic, deduplicates ag
 
 - Python 3.11+
 - [Tavily API key](https://tavily.com) (free tier: 1000 searches/month)
-- [Ollama](https://ollama.com) running locally with a model pulled (e.g. `ollama pull llama3.1:8b`)
+- [Ollama](https://ollama.com) running locally with models pulled:
+  - `ollama pull llama3.1:8b` (or your preferred summarization model)
+  - `ollama pull qwen3.5:4b` (reasoning model for query planning — required if `query_planning.enabled: true`)
 
 ## Setup
 
@@ -44,15 +46,33 @@ Edit `config.yaml` with your topic and delivery settings. Fill in `.env` with yo
 | `email_config` | SMTP settings — only needed if `delivery_method: "email"` |
 | `query_planning.enabled` | Enable LLM-driven query planning (default: `false`) |
 | `query_planning.max_queries` | Max queries per run including base topic (default: `5`) |
+| `query_planning.max_dimensions` | Max research dimensions in the two-stage plan (default: `6`) |
+| `planner_llm.model` | Reasoning model for topic decomposition (e.g. `qwen3.5:4b`) |
+| `planner_llm.think` | Enable extended chain-of-thought reasoning (default: `true`) |
+| `planner_llm.timeout` | Max seconds to wait for the planner LLM response (default: `300`) |
 
 ### Query planning
 
-When enabled, each run reads recently extracted terms from the database and asks the LLM to propose targeted queries. On the first run (empty term history) it falls back to deterministic term expansion. With `enabled: false` (the default), `search_queries` from config is used as-is.
+When enabled, the pipeline runs a two-stage planner each run:
+
+1. **Stage 1 — Topic decomposition**: a reasoning LLM (`qwen3.5:4b` with `think: true`) analyzes the base topic, previous research plan, extracted terms, and query performance to produce a structured research plan with prioritized dimensions.
+2. **Stage 2 — Query synthesis**: deterministic code converts the plan into concrete search queries, always anchoring on the base topic and prioritizing high-priority, under-explored dimensions.
+
+The research plan and reasoning trace are stored in SQLite and fed back into the next run, so the planner learns over time which angles yield new content and which are saturated.
+
+On the first run (no term history) or if the LLM fails, the system falls back to deterministic query expansion using top extracted terms. With `enabled: false`, `search_queries` from config is used as-is.
 
 ```yaml
 query_planning:
   enabled: true
   max_queries: 5
+  max_dimensions: 6
+
+planner_llm:
+  base_url: "http://localhost:11434"
+  model: "qwen3.5:4b"
+  think: true
+  timeout: 300
 ```
 
 ### Email delivery (Gmail example)
@@ -100,7 +120,7 @@ redpill plan --max-queries 8   # override query count
 
 ## Smoke test
 
-Verifies the full v2 feedback loop without any real API calls:
+Verifies the full pipeline (including v3 planning loop) without any real API calls:
 
 ```bash
 python smoke_test.py      # compact output
