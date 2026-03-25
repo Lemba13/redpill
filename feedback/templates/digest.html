@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}RedPill — {{ digest_date }}{% endblock %}
+{% block content %}
+<div class="header">
+    <h1>{{ topic }} — {{ digest_date }}</h1>
+    <p class="subtitle">{{ items | length }} items · Click thumbs to give feedback</p>
+</div>
+
+{% for item in items %}
+<div class="item-card {% if item.vote == 'up' %}voted-up{% elif item.vote == 'down' %}voted-down{% endif %}"
+     id="item-{{ item.item_id }}">
+
+    <div class="item-title">{{ item.title }}</div>
+    <div class="item-domain">{{ item.domain }}</div>
+    <div class="item-summary">{{ item.summary }}</div>
+    {% if item.key_insight %}
+    <div class="item-insight">{{ item.key_insight }}</div>
+    {% endif %}
+
+    <div class="item-actions">
+        <button class="vote-btn {% if item.vote == 'up' %}active-up{% endif %}"
+                onclick="vote('{{ item.item_id }}', 'up', this)"
+                aria-label="Mark as useful">
+            👍 Useful
+        </button>
+        <button class="vote-btn {% if item.vote == 'down' %}active-down{% endif %}"
+                onclick="vote('{{ item.item_id }}', 'down', this)"
+                aria-label="Mark as not useful">
+            👎 Not useful
+        </button>
+        <a href="{{ item.url }}" target="_blank" rel="noopener" class="source-link">
+            Read source ↗
+        </a>
+    </div>
+</div>
+{% endfor %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function vote(itemId, voteType, btn) {
+    // Find the card and both buttons
+    const card = document.getElementById('item-' + itemId);
+    const buttons = card.querySelectorAll('.vote-btn');
+
+    // Optimistic UI update
+    buttons.forEach(b => {
+        b.classList.remove('active-up', 'active-down');
+    });
+    btn.classList.add(voteType === 'up' ? 'active-up' : 'active-down');
+    card.className = 'item-card voted-' + voteType;
+
+    // Send vote to server
+    try {
+        const res = await fetch('/api/vote', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: itemId, vote: voteType })
+        });
+
+        if (!res.ok) {
+            throw new Error('Vote failed');
+        }
+    } catch (err) {
+        // Revert on failure
+        btn.classList.remove('active-up', 'active-down');
+        card.className = 'item-card';
+        console.error('Vote failed:', err);
+    }
+}
+</script>
+{% endblock %}

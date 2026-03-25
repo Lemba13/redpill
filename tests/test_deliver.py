@@ -474,6 +474,7 @@ class TestDeliver:
                 topic="AI",
                 date="2026-03-07",
                 config=SAMPLE_EMAIL_CONFIG,
+                feedback_base_url="",
             )
 
     def test_unknown_method_raises_value_error(self) -> None:

@@ -30,9 +30,11 @@ from urllib.parse import urlparse
 import yaml
 from dotenv import load_dotenv
 
+from redpill.config import get_feedback_config
 from redpill.dedup import compute_embedding, filter_new_items
-from redpill.deliver import DeliveryError, deliver
+from redpill.deliver import DeliveryError, deliver, generate_item_id, write_digest_sidecar
 from redpill.extract import extract_batch
+from redpill.feedback_reader import FeedbackReader
 from redpill.query_planner import plan_queries, plan_queries_fallback
 from redpill.search import search
 from redpill.state import (
@@ -138,6 +140,7 @@ def _merge_search_and_extract(
                 "published_date": sr.get("published_date"),
                 "content": er.get("content"),  # None when extraction failed
                 "extraction_success": er.get("extraction_success", False),
+                "source_query": sr.get("source_query") or "",
             }
         )
     return merged
@@ -193,6 +196,14 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     ollama_base_url: str = ollama_cfg.get("base_url", "http://localhost:11434")
     ollama_model: str = ollama_cfg.get("model", "qwen3:4b")
 
+    # Feedback config — fully merged with defaults so all keys are present.
+    fb_cfg: dict = get_feedback_config(config)
+    feedback_enabled: bool = bool(fb_cfg["enabled"])
+    feedback_base_url: str = str(fb_cfg["base_url"])
+    feedback_db_path: str = str(fb_cfg["db_path"])
+    min_votes_for_signals: int = int(fb_cfg["min_votes_for_signals"])
+    signal_lookback_days: int = int(fb_cfg["signal_lookback_days"])
+
     if not topic:
         print("ERROR: 'topic' is required in config.", file=sys.stderr)
         sys.exit(1)
@@ -224,6 +235,35 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     llm_client = OllamaClient(base_url=ollama_base_url, model=ollama_model)
 
     # ------------------------------------------------------------------
+    # Step 1b: Load feedback signals (read-only, best-effort)
+    # ------------------------------------------------------------------
+    feedback_signals: dict | None = None
+    if feedback_enabled and use_planner:
+        fb_db = Path(feedback_db_path)
+        if not fb_db.exists():
+            logger.info(
+                "Feedback DB not found at %s — cold start, skipping signals",
+                feedback_db_path,
+            )
+        else:
+            try:
+                with FeedbackReader(feedback_db_path) as reader:
+                    feedback_signals = reader.compute_preference_signals(
+                        topic, days=signal_lookback_days
+                    )
+                logger.info(
+                    "Loaded feedback signals: has_feedback=%s vote_count=%d",
+                    feedback_signals.get("has_feedback"),
+                    feedback_signals.get("vote_count", 0),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to load feedback signals from %s: %s — continuing without",
+                    feedback_db_path,
+                    exc,
+                )
+
+    # ------------------------------------------------------------------
     # Step 2: Plan queries
     # ------------------------------------------------------------------
     if use_planner:
@@ -232,7 +272,12 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         planner_conn.row_factory = sqlite3.Row
         try:
             planned_queries = plan_queries(
-                topic, planner_conn, llm_client, max_queries=max_queries
+                topic,
+                planner_conn,
+                llm_client,
+                max_queries=max_queries,
+                feedback_signals=feedback_signals,
+                min_votes_for_signals=min_votes_for_signals,
             )
         except Exception as exc:
             logger.warning("Query planner raised unexpectedly (%s) — using fallback", exc)
@@ -247,6 +292,23 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         ]
 
     query_strings: list[str] = [pq["query"] for pq in planned_queries]
+
+    # Build a lookup from query string → plan_dimension name for sidecar annotation.
+    # Fallback/static queries don't have a meaningful dimension, so map to "".
+    query_to_dimension: dict[str, str] = {}
+    for pq in planned_queries:
+        q = pq["query"]
+        # The dimension name lives in "reasoning" for llm_planned queries
+        # from synthesize_queries() which formats it as "Dimension 'name': ...".
+        # For all other sources we leave it blank — it's optional sidecar metadata.
+        if pq.get("source") == "llm_planned":
+            reasoning: str = pq.get("reasoning", "")
+            import re as _re
+            m = _re.search(r"Dimension\s+'([^']+)'", reasoning)
+            query_to_dimension[q] = m.group(1) if m else ""
+        else:
+            query_to_dimension[q] = ""
+
     logger.info(
         "Running %d search quer%s for topic %r ...",
         len(query_strings),
@@ -291,6 +353,12 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
 
     merged = _merge_search_and_extract(candidates, extracted)
 
+    # Annotate each merged item with source_query (from search.py's passthrough)
+    # and plan_dimension (derived from query_to_dimension lookup).
+    for item in merged:
+        sq: str = item.get("source_query") or ""
+        item["plan_dimension"] = query_to_dimension.get(sq, "")
+
     # ------------------------------------------------------------------
     # Step 5: Deduplicate
     # ------------------------------------------------------------------
@@ -327,9 +395,12 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         try:
             result = summarize_item(item, topic=topic, client=llm_client)
             # summarize_item always returns; it uses a fallback on LLM errors.
-            # Attach the original item fields we still need for state persistence.
+            # Attach the original item fields we still need for state persistence
+            # and sidecar annotation.
             result["_content"] = item.get("content")
             result["_snippet"] = item.get("snippet") or ""
+            result["source_query"] = item.get("source_query") or ""
+            result["plan_dimension"] = item.get("plan_dimension") or ""
             summarized.append(result)
         except Exception as exc:
             # Belt-and-suspenders: summarize_item is designed not to raise,
@@ -391,13 +462,34 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     else:
         logger.info("Delivering digest ...")
         try:
-            out = deliver(digest, topic=topic, date=today, config=config)
+            out = deliver(
+                digest,
+                topic=topic,
+                date=today,
+                config=config,
+                feedback_base_url=feedback_base_url if feedback_enabled else "",
+            )
             if out is not None:
                 logger.info("Digest written to %s", out)
         except (DeliveryError, ValueError) as exc:
             logger.error("Delivery failed: %s", exc)
             print(f"ERROR: Delivery failed: {exc}", file=sys.stderr)
             sys.exit(1)
+
+        # ------------------------------------------------------------------
+        # Step 8b: Write feedback sidecar (best-effort, after delivery)
+        # ------------------------------------------------------------------
+        if feedback_enabled:
+            try:
+                sidecar_path = write_digest_sidecar(
+                    items=summarized,
+                    topic=topic,
+                    date=today,
+                    feedback_base_url=feedback_base_url,
+                )
+                logger.info("Feedback sidecar written to %s", sidecar_path)
+            except Exception as exc:
+                logger.warning("Failed to write feedback sidecar: %s — continuing", exc)
 
         # ------------------------------------------------------------------
         # Step 9: Persist state
@@ -409,6 +501,9 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
             original = merged_by_url.get(url, {})
             content = s_item.pop("_content", None) or original.get("content")
             snippet = s_item.pop("_snippet", "") or original.get("snippet", "")
+            # Pop sidecar-only fields so they don't interfere with state persistence.
+            s_item.pop("source_query", None)
+            s_item.pop("plan_dimension", None)
 
             title: str = s_item.get("title") or original.get("title") or ""
             summary: str = s_item.get("summary") or ""
