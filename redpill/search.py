@@ -46,7 +46,7 @@ def _search_one(client: TavilyClient, query: str, max_results: int) -> list[dict
     Run a single Tavily query with up to _MAX_RETRIES attempts.
 
     Returns a list of normalised result dicts:
-        {url, title, snippet, published_date}
+        {url, title, snippet, published_date, source_query}
 
     Raises the last exception if all retries are exhausted, except for fatal
     errors (bad key, forbidden, bad request) which are re-raised immediately.
@@ -59,7 +59,7 @@ def _search_one(client: TavilyClient, query: str, max_results: int) -> list[dict
             response = client.search(query=query, max_results=max_results)
             raw_results: list[dict] = response.get("results", [])
             logger.debug("Query %r returned %d raw results", query, len(raw_results))
-            return [_normalise(r) for r in raw_results]
+            return [_normalise(r, source_query=query) for r in raw_results]
 
         except _FATAL_ERRORS as exc:
             # No point retrying — configuration or auth error.
@@ -83,18 +83,28 @@ def _search_one(client: TavilyClient, query: str, max_results: int) -> list[dict
     raise last_exc  # type: ignore[misc]  # guaranteed non-None here
 
 
-def _normalise(raw: dict) -> dict:
+def _normalise(raw: dict, source_query: str = "") -> dict:
     """
     Map a raw Tavily result dict to the project's canonical shape.
 
     Tavily uses 'content' for the snippet text. We rename it to 'snippet'
     for clarity and to decouple callers from Tavily's naming conventions.
+
+    Parameters
+    ----------
+    raw:
+        A single result dict from the Tavily API response.
+    source_query:
+        The search query string that produced this result.  Attached to the
+        result so downstream code (e.g. the sidecar writer) can attribute
+        each item back to its originating query.
     """
     return {
         "url": raw.get("url", ""),
         "title": raw.get("title", ""),
         "snippet": raw.get("content", ""),
         "published_date": raw.get("published_date"),  # None when absent — intentional
+        "source_query": source_query,
     }
 
 
@@ -117,7 +127,9 @@ def search(
 
     Returns
     -------
-    A list of result dicts, each with keys: url, title, snippet, published_date.
+    A list of result dicts, each with keys:
+        url, title, snippet, published_date, source_query.
+    ``source_query`` is the query string that produced the result.
     Results are deduplicated by URL (first occurrence wins).
     """
     if not queries:

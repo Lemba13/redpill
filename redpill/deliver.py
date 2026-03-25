@@ -6,6 +6,14 @@ Public API:
         Custom exception raised when delivery fails. Callers (e.g. main.py)
         should catch this rather than smtplib or OSError directly.
 
+    generate_item_id(url: str) -> str
+        Return a 12-character hex digest derived from the URL.
+        Stable across runs — the same URL always produces the same ID.
+
+    write_digest_sidecar(items, topic, date, feedback_base_url) -> Path
+        Write a structured JSON file to data/digests/{date}.json.
+        Called from main.py after delivery when feedback.enabled is True.
+
     deliver_markdown(digest: str, output_dir: str, date: str) -> Path
         Writes digest to {output_dir}/{date}.md.
         Creates the directory tree if needed. Overwrites with a warning if
@@ -24,12 +32,15 @@ Public API:
         Raises DeliveryError on any failure.
 """
 
+import hashlib
+import json
 import logging
 import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+from urllib.parse import urlparse
 
 import markdown as md_lib
 
@@ -48,6 +59,122 @@ class DeliveryError(Exception):
     behind a single exception type so the Phase 7 orchestrator has one thing
     to catch.
     """
+
+
+# ---------------------------------------------------------------------------
+# Feedback sidecar helpers
+# ---------------------------------------------------------------------------
+
+_SIDECAR_DIR = "data/digests"
+
+
+def generate_item_id(url: str) -> str:
+    """Return a 12-character hex ID derived from *url*.
+
+    SHA-256 of the URL encoded as UTF-8, truncated to 12 hex characters.
+    Stable across runs — the same URL always produces the same ID.
+
+    Parameters
+    ----------
+    url:
+        The article URL.
+
+    Returns
+    -------
+    A 12-character lowercase hex string.
+    """
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+
+
+def write_digest_sidecar(
+    items: list[dict],
+    topic: str,
+    date: str,
+    feedback_base_url: str,
+) -> Path:
+    """Write a structured JSON sidecar to ``data/digests/{date}.json``.
+
+    The sidecar is the contract between the pipeline and the feedback service.
+    It is written to a fixed directory (``data/digests/``) regardless of the
+    ``output_dir`` config value so the feedback service always knows where to
+    look.
+
+    Parameters
+    ----------
+    items:
+        List of summarized item dicts as returned by summarize_item().
+        Each must have at minimum: url, title, summary, key_insight,
+        relevance_score.  The optional ``source_query`` and
+        ``plan_dimension`` fields are written when present.
+    topic:
+        Research topic string.
+    date:
+        ISO date string (e.g. "2026-03-07").
+    feedback_base_url:
+        Base URL of the feedback service (e.g. "http://localhost:8080").
+        Stored in the sidecar for reference; not used for any HTTP call here.
+
+    Returns
+    -------
+    The resolved Path of the written JSON file.
+
+    Raises
+    ------
+    DeliveryError
+        If the sidecar directory cannot be created or the file cannot be
+        written.
+    """
+    out_dir = Path(_SIDECAR_DIR).resolve()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DeliveryError(
+            f"write_digest_sidecar: cannot create sidecar directory {out_dir!r}: {exc}"
+        ) from exc
+
+    serialized_items: list[dict] = []
+    for item in items:
+        url: str = item.get("url", "")
+        try:
+            domain = urlparse(url).netloc or url
+        except Exception:
+            domain = url
+
+        serialized_items.append(
+            {
+                "item_id": generate_item_id(url),
+                "title": item.get("title") or "",
+                "summary": item.get("summary") or "",
+                "url": url,
+                "domain": domain,
+                "key_insight": item.get("key_insight") or "",
+                "relevance_score": int(item.get("relevance_score", 1)),
+                "source_query": item.get("source_query") or "",
+                "plan_dimension": item.get("plan_dimension") or "",
+            }
+        )
+
+    payload: dict = {
+        "digest_date": date,
+        "topic": topic,
+        "item_count": len(serialized_items),
+        "feedback_base_url": feedback_base_url,
+        "items": serialized_items,
+    }
+
+    out_path = out_dir / f"{date}.json"
+    try:
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise DeliveryError(
+            f"write_digest_sidecar: cannot write sidecar to {out_path!r}: {exc}"
+        ) from exc
+
+    logger.info("write_digest_sidecar: sidecar written to %s", out_path)
+    return out_path
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +237,7 @@ def deliver_markdown(digest: str, output_dir: str, date: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _markdown_to_html(digest: str) -> str:
+def _markdown_to_html(digest: str, feedback_header: str = "") -> str:
     """Convert a markdown digest string to an HTML document string.
 
     Wraps the converted fragment in a minimal HTML skeleton with a basic
@@ -121,6 +248,15 @@ def _markdown_to_html(digest: str) -> str:
     Uses the ``markdown`` library (PyPI: markdown) which handles the subset
     of CommonMark that generate_digest() produces: ATX headings, bold,
     horizontal rules, and inline links.
+
+    Parameters
+    ----------
+    digest:
+        Raw markdown string.
+    feedback_header:
+        Optional pre-rendered HTML snippet inserted at the top of the body,
+        before the converted markdown content.  Used to inject the feedback
+        link banner.
     """
     html_body: str = md_lib.markdown(digest, extensions=["nl2br"])
     return (
@@ -134,8 +270,12 @@ def _markdown_to_html(digest: str) -> str:
         "hr{border:none;border-top:1px solid #e0e0e0;margin:1.5em 0}"
         "a{color:#1a6eb5}"
         "strong{font-weight:600}"
+        ".feedback-banner{background:#f0f4ff;border:1px solid #c7d2fe;"
+        "border-radius:6px;padding:10px 14px;margin-bottom:20px;"
+        "font-size:0.9em;color:#3730a3}"
         "</style>"
         "</head><body>"
+        + feedback_header
         + html_body
         + "</body></html>"
     )
@@ -147,6 +287,7 @@ def _build_email(
     date: str,
     sender: str,
     recipient: str,
+    feedback_base_url: str = "",
 ) -> MIMEMultipart:
     """Construct the multipart/alternative MIME message.
 
@@ -166,6 +307,9 @@ def _build_email(
         From address.
     recipient:
         To address.
+    feedback_base_url:
+        When non-empty, a feedback link banner is prepended to the HTML body
+        and a plain-text equivalent is prepended to the plain-text body.
     """
     msg = MIMEMultipart("alternative")
     # Subject line uses an em dash (—) as specified. Built by concatenation
@@ -174,8 +318,28 @@ def _build_email(
     msg["From"] = sender
     msg["To"] = recipient
 
-    plain_part = MIMEText(digest, "plain", "utf-8")
-    html_part = MIMEText(_markdown_to_html(digest), "html", "utf-8")
+    plain_text = digest
+    feedback_header_html = ""
+
+    if feedback_base_url:
+        digest_url = feedback_base_url.rstrip("/") + "/digest/" + date
+        plain_text = (
+            "View & give feedback: " + digest_url + "\n\n"
+            + digest
+        )
+        feedback_header_html = (
+            '<div class="feedback-banner">'
+            'View &amp; give feedback: '
+            '<a href="' + digest_url + '">' + digest_url + "</a>"
+            "</div>"
+        )
+
+    plain_part = MIMEText(plain_text, "plain", "utf-8")
+    html_part = MIMEText(
+        _markdown_to_html(digest, feedback_header=feedback_header_html),
+        "html",
+        "utf-8",
+    )
 
     # Attach plain first, then HTML — recipients see the HTML version unless
     # their client explicitly prefers plain text.
@@ -190,7 +354,13 @@ def _build_email(
 # ---------------------------------------------------------------------------
 
 
-def deliver_email(digest: str, topic: str, date: str, config: dict) -> None:
+def deliver_email(
+    digest: str,
+    topic: str,
+    date: str,
+    config: dict,
+    feedback_base_url: str = "",
+) -> None:
     """Send *digest* as a multipart email via SMTP with STARTTLS.
 
     Parameters
@@ -205,6 +375,9 @@ def deliver_email(digest: str, topic: str, date: str, config: dict) -> None:
         Dict with keys: smtp_host (str), smtp_port (int), sender (str),
         recipient (str). SMTP_PASSWORD is read from the environment, not
         from this dict.
+    feedback_base_url:
+        When non-empty, a feedback link is prepended to the email body so
+        the recipient can click through to the interactive digest page.
 
     Raises
     ------
@@ -230,6 +403,7 @@ def deliver_email(digest: str, topic: str, date: str, config: dict) -> None:
         date=date,
         sender=sender,
         recipient=recipient,
+        feedback_base_url=feedback_base_url,
     )
 
     logger.info(
@@ -295,7 +469,13 @@ def _validate_email_config(config: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def deliver(digest: str, topic: str, date: str, config: dict) -> Path | None:
+def deliver(
+    digest: str,
+    topic: str,
+    date: str,
+    config: dict,
+    feedback_base_url: str = "",
+) -> Path | None:
     """Dispatch digest delivery based on ``config["delivery_method"]``.
 
     Parameters
@@ -313,6 +493,9 @@ def deliver(digest: str, topic: str, date: str, config: dict) -> Path | None:
         For email delivery must also contain "email_config".
         For markdown delivery must also contain "output_dir" (optional —
         defaults to "data/digests").
+    feedback_base_url:
+        When non-empty and delivery_method is "email", a feedback link is
+        embedded in the email body.  Has no effect for markdown delivery.
 
     Returns
     -------
@@ -342,6 +525,7 @@ def deliver(digest: str, topic: str, date: str, config: dict) -> Path | None:
             topic=topic,
             date=date,
             config=config["email_config"],
+            feedback_base_url=feedback_base_url,
         )
         return None
 

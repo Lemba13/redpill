@@ -125,6 +125,67 @@ Example:
 """
 
 
+def _format_feedback_section(signals: dict) -> str:
+    """Render the feedback signals section for the decomposition prompt.
+
+    Called only when ``signals["has_feedback"]`` is True and
+    ``signals["vote_count"]`` meets the caller's minimum threshold.
+    """
+    period = signals.get("period_days", 30)
+    vote_count = signals.get("vote_count", 0)
+    engagement = signals.get("engagement", {})
+    engagement_pct = round(engagement.get("engagement_rate", 0.0) * 100, 1)
+
+    lines: list[str] = [
+        f"\nUser feedback signals (last {period} days, {vote_count} votes):\n"
+    ]
+
+    dim_prefs: list[dict] = signals.get("dimension_preferences", [])
+    if dim_prefs:
+        lines.append("Dimension preferences (approval rate from user votes):")
+        for dp in dim_prefs:
+            lines.append(
+                f"  - {dp['dimension']!r}: "
+                f"{dp['up']} up, {dp['down']} down "
+                f"(approval: {dp['approval']:.0%}, shown: {dp['shown']})"
+            )
+
+    src_prefs: list[dict] = signals.get("source_preferences", [])
+    if src_prefs:
+        lines.append("\nSource preferences:")
+        for sp in src_prefs:
+            lines.append(
+                f"  - {sp['domain']}: "
+                f"{sp['up']} up, {sp['down']} down "
+                f"(approval: {sp['approval']:.0%}, shown: {sp['shown']})"
+            )
+
+    lines.append(f"\nOverall engagement rate: {engagement_pct}% of delivered items received a vote.")
+
+    term_sentiment: list[dict] | None = signals.get("term_sentiment")
+    if term_sentiment:
+        lines.append("\nTerm sentiment (from source queries of voted items):")
+        for ts in term_sentiment[:10]:
+            lines.append(
+                f"  - {ts['term']!r}: {ts['sentiment']} "
+                f"({ts['up']} up, {ts['down']} down)"
+            )
+
+    lines.append(
+        "\nUse these signals to adjust dimension priorities:\n"
+        "- High-approval dimensions should get more query budget\n"
+        "- Low-approval dimensions should be deprioritized (but not eliminated "
+        "— keep at least one exploratory query)\n"
+        "- Prefer sources the user engages with when multiple options exist\n"
+        "- Weight these signals proportionally to the engagement rate — a 5% "
+        "engagement rate means weak signal, treat cautiously. A 50%+ rate means "
+        "strong signal, lean into it.\n"
+        "- IMPORTANT: Always keep at least one exploratory dimension regardless "
+        "of feedback. Do not create a filter bubble."
+    )
+    return "\n".join(lines)
+
+
 def _build_decompose_prompt(
     topic: str,
     today: str,
@@ -133,12 +194,23 @@ def _build_decompose_prompt(
     top_terms: list[dict],
     query_perf: list[dict],
     max_dimensions: int,
+    feedback_signals: dict | None = None,
+    min_votes_for_signals: int = 5,
 ) -> str:
     """Build the two-stage decomposition prompt for the reasoning LLM.
 
     This is the most important prompt in the system. It gives the reasoning
     model all available context and asks it to produce a structured research
     plan with dimensions, priorities, and coverage assessments.
+
+    Parameters
+    ----------
+    feedback_signals:
+        When provided and ``signals["has_feedback"]`` is True and vote_count
+        meets *min_votes_for_signals*, a formatted feedback section is
+        appended to the prompt.
+    min_votes_for_signals:
+        Minimum total votes before feedback signals are included.
     """
     # Format previous plan
     if previous_plan:
@@ -177,7 +249,7 @@ def _build_decompose_prompt(
     else:
         query_perf_text = "  (no query history yet)"
 
-    return f"""\
+    base_prompt = f"""\
 You are a research strategist planning the next search run for a daily research digest.
 
 Topic: {topic}
@@ -194,7 +266,22 @@ All-time top terms (by frequency):
 
 Query performance from recent runs:
 {query_perf_text}
+"""
 
+    # Append feedback signals when available and meaningful.
+    if (
+        feedback_signals is not None
+        and feedback_signals.get("has_feedback")
+        and feedback_signals.get("vote_count", 0) >= min_votes_for_signals
+    ):
+        base_prompt += _format_feedback_section(feedback_signals)
+    else:
+        base_prompt += (
+            "\nNo user feedback available yet. "
+            "Base priorities on topic analysis and query performance only.\n"
+        )
+
+    base_prompt += f"""
 Your task: Produce an updated research plan with {max_dimensions} dimensions \
 (subtopics/angles) to investigate.
 
@@ -221,6 +308,7 @@ Rules:
 Respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON.
 The top-level JSON object must have exactly these keys: "dimensions", "dropped_dimensions", "new_directions".
 """
+    return base_prompt
 
 
 def _parse_llm_queries(raw: str, topic: str, n_expected: int) -> list[dict]:
@@ -307,6 +395,8 @@ def decompose_topic(
     conn: "sqlite3.Connection",
     planner_llm: "PlannerLLMClient",
     max_dimensions: int = 6,
+    feedback_signals: "dict | None" = None,
+    min_votes_for_signals: int = 5,
 ) -> dict:
     """Stage 1: use the reasoning LLM to produce a structured research plan.
 
@@ -324,6 +414,12 @@ def decompose_topic(
         A PlannerLLMClient instance (reasoning model with think=True).
     max_dimensions:
         Maximum number of research dimensions to include in the plan.
+    feedback_signals:
+        Optional dict from FeedbackReader.compute_preference_signals().
+        When provided and has_feedback is True with enough votes, user
+        preference signals are included in the planning prompt.
+    min_votes_for_signals:
+        Minimum vote count before feedback signals are included.
 
     Returns
     -------
@@ -360,6 +456,8 @@ def decompose_topic(
         top_terms=top_terms,
         query_perf=query_perf,
         max_dimensions=max_dimensions,
+        feedback_signals=feedback_signals,
+        min_votes_for_signals=min_votes_for_signals,
     )
 
     logger.info(
@@ -567,6 +665,8 @@ def plan_queries(
     conn: "sqlite3.Connection",
     llm_client: "LLMClient",
     max_queries: int = 5,
+    feedback_signals: "dict | None" = None,
+    min_votes_for_signals: int = 5,
 ) -> list[dict]:
     """Generate search queries using the best available strategy.
 
@@ -598,6 +698,11 @@ def plan_queries(
         A PlannerLLMClient (two-stage) or any LLMClient (single-stage).
     max_queries:
         Maximum number of queries to return (including the base query).
+    feedback_signals:
+        Optional preference signals from FeedbackReader.compute_preference_signals().
+        Passed through to decompose_topic() for the two-stage path only.
+    min_votes_for_signals:
+        Minimum vote count before feedback signals affect the planning prompt.
 
     Returns
     -------
@@ -616,7 +721,13 @@ def plan_queries(
     # ------------------------------------------------------------------
     if isinstance(llm_client, _PlannerLLMClient):
         try:
-            plan = decompose_topic(topic, conn, llm_client)
+            plan = decompose_topic(
+                topic,
+                conn,
+                llm_client,
+                feedback_signals=feedback_signals,
+                min_votes_for_signals=min_votes_for_signals,
+            )
         except Exception as exc:
             logger.warning(
                 "plan_queries: decompose_topic failed (%s) — falling back to single-stage",

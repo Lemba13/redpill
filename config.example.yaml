@@ -60,3 +60,16 @@ email_config:
   smtp_port: 587
   sender: "redpill@example.com"
   recipient: "you@example.com"
+
+# Feedback service configuration.
+# When enabled: true, the pipeline writes JSON sidecars to data/digests/ and
+# embeds feedback links in email deliveries.
+# Run the feedback service with: redpill-feedback
+# No API keys required — it is a local service.
+feedback:
+  enabled: false
+  base_url: "http://localhost:8080"    # URL for feedback links in emails
+  port: 8080                           # port for the feedback service
+  db_path: "data/feedback.db"          # feedback database location
+  min_votes_for_signals: 5             # minimum votes before feedback affects planning
+  signal_lookback_days: 30             # how many days of feedback to consider

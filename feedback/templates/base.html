@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}RedPill Feedback{% endblock %}</title>
+    <style>
+        /* --- Reset & base --- */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg: #ffffff;
+            --bg-card: #f8f9fa;
+            --bg-hover: #f0f1f3;
+            --text-primary: #1a1a1a;
+            --text-secondary: #5a5a5a;
+            --text-muted: #8a8a8a;
+            --border: #e2e4e8;
+            --accent: #4f46e5;
+            --accent-light: #eef2ff;
+            --green: #16a34a;
+            --green-light: #f0fdf4;
+            --green-border: #bbf7d0;
+            --red: #dc2626;
+            --red-light: #fef2f2;
+            --red-border: #fecaca;
+            --radius: 8px;
+            --radius-lg: 12px;
+            --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0f0f0f;
+                --bg-card: #1a1a1a;
+                --bg-hover: #252525;
+                --text-primary: #e5e5e5;
+                --text-secondary: #a0a0a0;
+                --text-muted: #666666;
+                --border: #2a2a2a;
+                --accent: #818cf8;
+                --accent-light: #1e1b4b;
+                --green-light: #052e16;
+                --green-border: #14532d;
+                --red-light: #450a0a;
+                --red-border: #7f1d1d;
+                --shadow: 0 1px 3px rgba(0,0,0,0.3);
+            }
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 680px;
+            margin: 0 auto;
+            padding: 24px 16px;
+        }
+
+        /* --- Header --- */
+        .header {
+            margin-bottom: 32px;
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .header .subtitle {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        /* --- Digest item card --- */
+        .item-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 20px;
+            margin-bottom: 16px;
+            box-shadow: var(--shadow);
+            transition: border-color 0.15s ease;
+        }
+
+        .item-card.voted-up {
+            border-color: var(--green-border);
+            background: var(--green-light);
+        }
+
+        .item-card.voted-down {
+            border-color: var(--red-border);
+            background: var(--red-light);
+        }
+
+        .item-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            line-height: 1.4;
+        }
+
+        .item-domain {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+
+        .item-summary {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            line-height: 1.5;
+        }
+
+        .item-insight {
+            font-size: 13px;
+            color: var(--accent);
+            font-style: italic;
+            margin-bottom: 14px;
+        }
+
+        .item-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        /* --- Vote buttons --- */
+        .vote-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--text-secondary);
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            -webkit-tap-highlight-color: transparent;  /* clean tap on mobile */
+            user-select: none;
+            min-height: 44px;   /* Apple HIG minimum touch target */
+            min-width: 44px;
+        }
+
+        .vote-btn:hover {
+            background: var(--bg-hover);
+            border-color: var(--text-muted);
+        }
+
+        .vote-btn:active {
+            transform: scale(0.97);
+        }
+
+        .vote-btn.active-up {
+            background: var(--green-light);
+            border-color: var(--green);
+            color: var(--green);
+        }
+
+        .vote-btn.active-down {
+            background: var(--red-light);
+            border-color: var(--red);
+            color: var(--red);
+        }
+
+        .vote-btn.disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .source-link {
+            font-size: 13px;
+            color: var(--accent);
+            text-decoration: none;
+            margin-left: auto;
+        }
+
+        .source-link:hover {
+            text-decoration: underline;
+        }
+
+        /* --- Digest list (index page) --- */
+        .digest-link {
+            display: block;
+            padding: 14px 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin-bottom: 8px;
+            text-decoration: none;
+            color: var(--text-primary);
+            font-size: 15px;
+            transition: background 0.15s ease;
+        }
+
+        .digest-link:hover {
+            background: var(--bg-hover);
+        }
+
+        .digest-link .date {
+            font-weight: 600;
+        }
+
+        .digest-link .meta {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* --- Responsive --- */
+        @media (max-width: 480px) {
+            .container { padding: 16px 12px; }
+            .item-card { padding: 16px; }
+            .item-actions { gap: 6px; }
+            .vote-btn { padding: 10px 14px; flex: 1; justify-content: center; }
+            .source-link { margin-left: 0; margin-top: 8px; flex-basis: 100%; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

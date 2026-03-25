@@ -281,4 +281,4 @@ class TestSearch:
         with patcher:
             results = search(["q"], max_results=5, api_key="fake")
         assert len(results) == 1
-        assert set(results[0].keys()) == {"url", "title", "snippet", "published_date"}
+        assert set(results[0].keys()) == {"url", "title", "snippet", "published_date", "source_query"}

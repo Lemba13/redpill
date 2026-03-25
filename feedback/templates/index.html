@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}RedPill — Digests{% endblock %}
+{% block content %}
+<div class="header">
+    <h1>RedPill Digests</h1>
+    <p class="subtitle">Select a digest to view and give feedback</p>
+</div>
+
+{% for digest in digests %}
+<a href="/digest/{{ digest.date }}" class="digest-link">
+    <span class="date">{{ digest.date }}</span>
+    <span class="meta">{{ digest.item_count }} items · {{ digest.vote_count }} votes given</span>
+</a>
+{% endfor %}
+
+{% if not digests %}
+<p style="color: var(--text-muted); text-align: center; margin-top: 48px;">
+    No digests yet. Run the pipeline to generate your first digest.
+</p>
+{% endif %}
+{% endblock %}

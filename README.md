@@ -1,17 +1,18 @@
 # RedPill
 
-An autonomous agent that crawls the web daily for a given topic, deduplicates against previously seen content, summarizes new findings with a local LLM, and delivers a clean digest. Each run extracts domain-specific terms and uses them to plan smarter queries for the next run.
+An autonomous agent that crawls the web daily for a given topic, deduplicates against previously seen content, summarizes new findings with a local LLM, and delivers a clean digest. Each run extracts domain-specific terms and uses them to plan smarter queries for the next run. A lightweight feedback service lets you vote on digest items, and those signals feed back into the planner to prioritize what you actually find useful.
 
 ## How it works
 
-1. **Plan** — Uses term history from prior runs to generate targeted search queries via LLM (or falls back to deterministic term expansion). The base topic is always included.
+1. **Plan** — Uses term history and user feedback signals from prior runs to generate targeted search queries via LLM (or falls back to deterministic term expansion). The base topic is always included.
 2. **Search** — Queries Tavily with the planned queries for broad coverage
 3. **Extract** — Fetches each URL and strips it down to main article text
 4. **Deduplicate** — Filters out previously seen articles by URL and semantic similarity
 5. **Summarize** — Sends new articles to a local Ollama LLM for structured summaries
 6. **Extract terms** — Pulls domain-specific terms (techniques, authors, datasets, frameworks) from high-relevance articles to feed the next planning cycle
-7. **Deliver** — Writes a markdown digest or sends it via email
+7. **Deliver** — Writes a markdown digest or sends it via email (with a feedback link when the feedback service is enabled)
 8. **Persist** — Saves seen URLs, embeddings, extracted terms, and query stats to SQLite
+9. **Feedback** — Reads votes from `feedback.db` and incorporates preference signals (dimension approval, source preference, engagement rate) into the next planning cycle
 
 ## Requirements
 
@@ -33,6 +34,12 @@ cp .env.example .env
 
 Edit `config.yaml` with your topic and delivery settings. Fill in `.env` with your secrets — `.env.example` documents all available variables including `TAVILY_API_KEY`, `SMTP_PASSWORD`, and `HUGGINGFACE_HUB_VERBOSITY` (pre-set to silence a cosmetic HuggingFace auth warning for the public embedding model).
 
+To use the feedback service, install its optional dependencies:
+
+```bash
+pip install -e ".[feedback]"
+```
+
 ## Configuration
 
 | Key | Description |
@@ -50,6 +57,11 @@ Edit `config.yaml` with your topic and delivery settings. Fill in `.env` with yo
 | `planner_llm.model` | Reasoning model for topic decomposition (e.g. `qwen3.5:4b`) |
 | `planner_llm.think` | Enable extended chain-of-thought reasoning (default: `true`) |
 | `planner_llm.timeout` | Max seconds to wait for the planner LLM response (default: `300`) |
+| `feedback.enabled` | Write JSON sidecars and embed feedback links in emails (default: `false`) |
+| `feedback.base_url` | URL where the feedback service is reachable (default: `http://localhost:8080`) |
+| `feedback.db_path` | Path to the feedback SQLite database (default: `data/feedback.db`) |
+| `feedback.min_votes_for_signals` | Minimum votes before feedback influences planning (default: `5`) |
+| `feedback.signal_lookback_days` | How many days of vote history to consider (default: `30`) |
 
 ### Query planning
 
@@ -118,6 +130,22 @@ redpill plan                   # show what queries would be planned next run
 redpill plan --max-queries 8   # override query count
 ```
 
+### Feedback service
+
+When `feedback.enabled: true`, each pipeline run writes a JSON sidecar to `data/digests/YYYY-MM-DD.json` alongside the digest. The feedback service reads these sidecars and serves an interactive page where you can vote on items.
+
+Start the service (keep it running persistently):
+
+```bash
+redpill-feedback
+# or in the background:
+nohup redpill-feedback > data/feedback.log 2>&1 &
+```
+
+Then open `http://localhost:8080` after a pipeline run. Vote on items — once you reach `min_votes_for_signals` votes, the planner will start factoring in your preferences: boosting dimensions you upvote, deprioritizing ones you downvote, and preferring sources you engage with.
+
+The feedback service and the pipeline are fully decoupled — they share only the filesystem (`data/digests/*.json`) and `feedback.db`. The pipeline reads `feedback.db` in read-only mode. If the service is down, the pipeline continues unaffected.
+
 ## Smoke test
 
 Verifies the full pipeline (including v3 planning loop) without any real API calls:
@@ -133,4 +161,10 @@ Add to cron to run daily at 7 AM:
 
 ```
 0 7 * * * cd /path/to/redpill && redpill run
+```
+
+To keep the feedback service alive across reboots, add it as a separate cron `@reboot` entry:
+
+```
+@reboot cd /path/to/redpill && nohup redpill-feedback > data/feedback.log 2>&1 &
 ```
