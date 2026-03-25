@@ -159,6 +159,7 @@ class OllamaClient:
             response: ollama.ChatResponse = self._client.chat(
                 model=self._model,
                 messages=messages,
+                options={"num_predict": -1},
             )
         except ollama.RequestError as exc:
             raise RuntimeError(f"Ollama request error: {exc}") from exc
