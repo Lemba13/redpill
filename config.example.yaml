@@ -19,6 +19,7 @@ db_path: "data/redpill.db"
 # "email"    sends via SMTP (requires email_config below)
 delivery_method: "markdown"
 
+# Summarization + term extraction model (used on every article).
 ollama_config:
   base_url: "http://localhost:11434"
   model: "llama3.1:8b"  # e.g. "qwen3:4b", "mistral"
@@ -28,9 +29,30 @@ embedding_model: "all-MiniLM-L6-v2"
 # Query planning — uses term history from prior runs to generate targeted queries.
 # Set enabled: true after a few runs have built up term history.
 # When enabled, search_queries above is ignored.
+#
+# Two modes are supported:
+#   - Two-stage (recommended): set planner_llm.model to a reasoning model.
+#     The planner decomposes the topic into research dimensions, then
+#     synthesizes queries from the plan. Requires a model that supports
+#     think=true (e.g. qwen3.5:4b — pull with: ollama pull qwen3.5:4b).
+#   - Single-stage (simpler): set planner_llm.model to the same model as
+#     ollama_config.model. The LLM is prompted for query strings directly.
 query_planning:
-  enabled: false
-  max_queries: 5
+  enabled: false        # set to true once term history has been built up
+  max_queries: 5        # total queries per run including base topic
+  max_dimensions: 6     # max subtopics in the two-stage research plan
+
+# Research planner model — called once per run for topic decomposition.
+# Uses a reasoning model (think: true) when available for best results.
+# Set model to the same as ollama_config.model for a simpler single-stage path.
+#
+# Required model: ollama pull qwen3.5:4b
+# (or substitute any model that supports think: true)
+planner_llm:
+  base_url: "http://localhost:11434"
+  model: "qwen3.5:4b"   # reasoning model; supports think: true
+  think: true           # enable extended chain-of-thought reasoning
+  timeout: 120          # seconds — reasoning models can be slow on first call
 
 # Required only if delivery_method is "email"
 email_config:

@@ -1,6 +1,6 @@
 """
 state.py — SQLite-backed state management for seen items, extracted terms,
-and query logs.
+query logs, and research plans.
 
 Tables
 ------
@@ -30,11 +30,19 @@ query_log:
     id              INTEGER PRIMARY KEY AUTOINCREMENT
     query_text      TEXT NOT NULL
     run_date        DATE NOT NULL
-    source          TEXT NOT NULL   -- base|extracted_term|llm_planned
+    source          TEXT NOT NULL   -- base|extracted_term|llm_planned|fallback|static
     topic           TEXT NOT NULL
     results_count   INTEGER DEFAULT 0
     new_items       INTEGER DEFAULT 0
     kept_items      INTEGER DEFAULT 0
+
+research_plans:
+    id              INTEGER PRIMARY KEY AUTOINCREMENT
+    topic           TEXT NOT NULL
+    run_date        DATE NOT NULL
+    plan_json       TEXT NOT NULL       -- full research plan as JSON
+    reasoning_trace TEXT               -- reasoning model's chain of thought (if available)
+    source          TEXT NOT NULL DEFAULT 'llm'  -- "llm" or "fallback"
 
 Embedding serialization format (all fields packed via struct.pack):
     [4 bytes: dtype_len (uint32 big-endian)]
@@ -55,6 +63,8 @@ Public API:
     log_query(query_text: str, run_date: str, source: str, topic: str, db_path: str) -> int
     update_query_stats(query_id: int, results_count: int, new_items: int, kept_items: int, db_path: str) -> None
     get_query_performance(topic: str, db_path: str, days: int = 14) -> list[dict]
+    save_research_plan(topic: str, run_date: str, plan: dict, db_path: str, reasoning_trace: str | None, source: str) -> int
+    get_latest_research_plan(topic: str, db_path: str) -> dict | None
 
 Internal (for testing with an in-memory connection):
     init_db_conn(conn) -> None
@@ -68,6 +78,8 @@ Internal (for testing with an in-memory connection):
     log_query_conn(query_text, run_date, source, topic, conn) -> int
     update_query_stats_conn(query_id, results_count, new_items, kept_items, conn) -> None
     get_query_performance_conn(topic, days, conn) -> list[dict]
+    save_research_plan_conn(topic, run_date, plan, conn, reasoning_trace, source) -> int
+    get_latest_research_plan_conn(topic, conn) -> dict | None
 """
 
 import logging
@@ -121,6 +133,17 @@ CREATE TABLE IF NOT EXISTS query_log (
     results_count   INTEGER NOT NULL DEFAULT 0,
     new_items       INTEGER NOT NULL DEFAULT 0,
     kept_items      INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+_CREATE_RESEARCH_PLANS_SQL = """
+CREATE TABLE IF NOT EXISTS research_plans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic           TEXT NOT NULL,
+    run_date        DATE NOT NULL,
+    plan_json       TEXT NOT NULL,
+    reasoning_trace TEXT,
+    source          TEXT NOT NULL DEFAULT 'llm'
 )
 """
 
@@ -221,6 +244,7 @@ def init_db_conn(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_SEEN_ITEMS_SQL)
     conn.execute(_CREATE_EXTRACTED_TERMS_SQL)
     conn.execute(_CREATE_QUERY_LOG_SQL)
+    conn.execute(_CREATE_RESEARCH_PLANS_SQL)
     logger.debug("All tables initialised (or already exist)")
 
 
@@ -568,7 +592,95 @@ def get_query_performance_conn(
 
 
 # ---------------------------------------------------------------------------
-# extracted_terms + query_log — public API (db_path-based)
+# research_plans — internal implementations
+# ---------------------------------------------------------------------------
+
+def save_research_plan_conn(
+    topic: str,
+    run_date: str,
+    plan: dict,
+    conn: sqlite3.Connection,
+    reasoning_trace: str | None = None,
+    source: str = "llm",
+) -> int:
+    """Persist a research plan for *topic* on *run_date*.
+
+    The plan is stored as serialized JSON in ``plan_json``. Each call inserts
+    a new row — the table is append-only; callers can retrieve the most recent
+    plan via get_latest_research_plan_conn.
+
+    Parameters
+    ----------
+    topic:
+        The research topic this plan belongs to.
+    run_date:
+        ISO date string of the pipeline run (e.g. "2026-03-15").
+    plan:
+        The research plan dict produced by decompose_topic() or the fallback.
+    conn:
+        An open SQLite connection.
+    reasoning_trace:
+        The reasoning model's chain-of-thought text, if available.
+    source:
+        "llm" when the plan came from the reasoning model, "fallback" otherwise.
+
+    Returns
+    -------
+    The ``id`` of the newly inserted row.
+    """
+    import json as _json
+
+    plan_json = _json.dumps(plan, ensure_ascii=False)
+    cursor = conn.execute(
+        """
+        INSERT INTO research_plans (topic, run_date, plan_json, reasoning_trace, source)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (topic, run_date, plan_json, reasoning_trace, source),
+    )
+    row_id: int = cursor.lastrowid  # type: ignore[assignment]
+    logger.debug(
+        "save_research_plan_conn: saved plan for topic=%r run_date=%r source=%r id=%d",
+        topic, run_date, source, row_id,
+    )
+    return row_id
+
+
+def get_latest_research_plan_conn(
+    topic: str,
+    conn: sqlite3.Connection,
+) -> dict | None:
+    """Return the most recent research plan for *topic*, or None.
+
+    The returned dict includes all columns: id, topic, run_date, plan_json
+    (as a string), reasoning_trace, source. Callers are responsible for
+    deserializing plan_json via json.loads().
+    """
+    row = conn.execute(
+        """
+        SELECT id, topic, run_date, plan_json, reasoning_trace, source
+        FROM research_plans
+        WHERE topic = ?
+        ORDER BY run_date DESC, id DESC
+        LIMIT 1
+        """,
+        (topic,),
+    ).fetchone()
+
+    if row is None:
+        logger.debug("get_latest_research_plan_conn: no plan found for topic=%r", topic)
+        return None
+
+    result = dict(row)
+    logger.debug(
+        "get_latest_research_plan_conn: found plan id=%d run_date=%r for topic=%r",
+        result["id"], result["run_date"], topic,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# extracted_terms + query_log + research_plans — public API (db_path-based)
 # ---------------------------------------------------------------------------
 
 def store_extracted_terms(
@@ -632,3 +744,33 @@ def get_query_performance(
     """Return query log entries for *topic* within the last *days* days."""
     with _open_conn(db_path) as conn:
         return get_query_performance_conn(topic, days, conn)
+
+
+def save_research_plan(
+    topic: str,
+    run_date: str,
+    plan: dict,
+    db_path: str = DEFAULT_DB_PATH,
+    reasoning_trace: str | None = None,
+    source: str = "llm",
+) -> int:
+    """Persist a research plan for *topic* on *run_date*. Returns the row id."""
+    with _open_conn(db_path) as conn:
+        return save_research_plan_conn(
+            topic, run_date, plan, conn,
+            reasoning_trace=reasoning_trace,
+            source=source,
+        )
+
+
+def get_latest_research_plan(
+    topic: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict | None:
+    """Return the most recent research plan for *topic*, or None.
+
+    The returned dict includes all columns including plan_json (as a string).
+    Callers must deserialize plan_json via json.loads() to get the plan dict.
+    """
+    with _open_conn(db_path) as conn:
+        return get_latest_research_plan_conn(topic, conn)
