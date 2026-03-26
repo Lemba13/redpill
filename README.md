@@ -159,14 +159,42 @@ python smoke_test.py -v   # verbose (show every check)
 
 ## Scheduling
 
-Add to cron to run daily at 7 AM:
+Two helper scripts in `sisyphus/` handle scheduling. They load `.env` automatically so API keys are available to cron, and use absolute paths throughout.
+
+**`sisyphus/run_pipeline.sh`** — runs the daily pipeline, logs to `data/redpill.log`.
+
+**`sisyphus/start_feedback.sh`** — starts the feedback service in the background via `nohup`, logs to `data/feedback.log`. Safe to call multiple times — skips if already running.
+
+Add both to your user crontab (`crontab -e`):
 
 ```
-0 7 * * * cd /path/to/redpill && redpill run
+# Feedback service — start on every boot (60s delay for network to come up)
+@reboot sleep 60 && /path/to/redpill/sisyphus/start_feedback.sh
+
+# Daily pipeline — runs at 10 AM
+0 10 * * * /path/to/redpill/sisyphus/run_pipeline.sh
 ```
 
-To keep the feedback service alive across reboots, add it as a separate cron `@reboot` entry:
+Replace `/path/to/redpill` with your actual project path. No `sudo` required.
 
+To restart the feedback service after making changes:
+
+```bash
+pkill -f redpill-feedback && ./sisyphus/start_feedback.sh
 ```
-@reboot cd /path/to/redpill && nohup redpill-feedback > data/feedback.log 2>&1 &
+
+### Tailscale
+
+The feedback service binds to `0.0.0.0:8080`, so it's reachable over Tailscale from any device on your tailnet. Set `feedback.base_url` in `config.yaml` to your machine's Tailscale address so vote links in digest emails point to the right place:
+
+```yaml
+feedback:
+  base_url: "http://<tailscale-ip>:8080"
+```
+
+Using your Tailscale DNS hostname (`<machine>.tail*.ts.net`) is more resilient than a raw IP — the IP can change if the device is re-registered, but the hostname stays stable:
+
+```yaml
+feedback:
+  base_url: "http://<machine>.tail*.ts.net:8080"
 ```
