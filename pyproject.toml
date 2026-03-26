@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv",
     "numpy",
     "markdown",
+    "httpx",
 ]
 
 [project.optional-dependencies]

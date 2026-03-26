@@ -21,6 +21,7 @@ CLI (via argparse):
 import argparse
 import hashlib
 import logging
+import os
 import sqlite3
 import sys
 from datetime import date as _date
@@ -30,7 +31,7 @@ from urllib.parse import urlparse
 import yaml
 from dotenv import load_dotenv
 
-from redpill.config import get_feedback_config
+from redpill.config import get_feedback_config, get_search_provider
 from redpill.dedup import compute_embedding, filter_new_items
 from redpill.deliver import DeliveryError, deliver, generate_item_id, write_digest_sidecar
 from redpill.extract import extract_batch
@@ -216,6 +217,22 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         )
         sys.exit(1)
 
+    # Resolve and validate the search provider.  Fail fast here (before any
+    # network or DB I/O) when SERPER_API_KEY is required but missing.
+    try:
+        provider_name: str = get_search_provider(config)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if provider_name in ("serper", "both") and "SERPER_API_KEY" not in os.environ:
+        print(
+            f"ERROR: search_provider is {provider_name!r} but SERPER_API_KEY is not set. "
+            "Add it to your .env file.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Ensure the data directory exists before init_db tries to create the file.
     db_dir = Path(db_path).parent
     db_dir.mkdir(parents=True, exist_ok=True)
@@ -331,7 +348,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     # Step 3: Search
     # ------------------------------------------------------------------
     try:
-        candidates = search(query_strings, max_results=max_results)
+        candidates = search(query_strings, max_results=max_results, provider=provider_name)
     except Exception as exc:
         logger.error("Search failed: %s", exc)
         print(f"ERROR: Search step failed: {exc}", file=sys.stderr)

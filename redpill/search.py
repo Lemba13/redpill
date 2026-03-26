@@ -1,11 +1,12 @@
 """
-search.py — Step 1: Query Tavily with multiple query variations.
+search.py — Step 1: Query search provider(s) with multiple query variations.
 
 Public API:
-    search(queries: list[str], max_results: int) -> list[dict]
-        Each result: {url, title, snippet, published_date}
+    search(queries, max_results, api_key=None, provider="tavily") -> list[dict]
+        Each result: {url, title, snippet, published_date, source_query}
         Merges results from all queries and deduplicates by URL.
-        Retries on API errors (max 3, exponential backoff).
+        Retries on API errors (max 3, exponential backoff) for Tavily.
+        provider: "tavily" | "serper" | "both"
 """
 
 import logging
@@ -112,18 +113,25 @@ def search(
     queries: list[str],
     max_results: int,
     api_key: Optional[str] = None,
+    provider: str = "tavily",
 ) -> list[dict]:
     """
-    Run all query variations against Tavily, merge, and deduplicate by URL.
+    Run all query variations against the selected provider(s), merge, and
+    deduplicate by URL.
 
     Parameters
     ----------
     queries:
         One or more search query strings. All will be executed.
     max_results:
-        Maximum results to request *per query*. Tavily's hard ceiling is 20.
+        Maximum results to request *per query*. Tavily's hard ceiling is 20;
+        Serper's free-tier cap is 10 (clamped automatically).
     api_key:
         Tavily API key. Falls back to the TAVILY_API_KEY environment variable.
+        Ignored when provider is ``"serper"`` or ``"both"``.
+    provider:
+        Which backend(s) to use: ``"tavily"`` (default), ``"serper"``, or
+        ``"both"`` (fan-out to both and merge).
 
     Returns
     -------
@@ -136,6 +144,64 @@ def search(
         logger.warning("search() called with empty queries list — returning []")
         return []
 
+    # ------------------------------------------------------------------
+    # When provider is "tavily" we stay on the original code path so that
+    # existing callers (and tests that mock _make_client) are unaffected.
+    # For any other provider we delegate to search_providers.
+    # ------------------------------------------------------------------
+    if provider == "tavily":
+        return _search_tavily(queries, max_results, api_key)
+
+    # Lazy import to avoid a circular dependency at module load time
+    # (search_providers imports from this module).
+    from redpill.search_providers import SearchResult, create_search_provider
+
+    search_provider_obj = create_search_provider(provider)
+    seen_urls: set[str] = set()
+    merged: list[dict] = []
+
+    for query in queries:
+        try:
+            results: list[SearchResult] = search_provider_obj.search(query, max_results)
+        except Exception as exc:
+            logger.error("Skipping query %r after provider failure: %s", query, exc)
+            continue
+
+        added = 0
+        for result in results:
+            url = result.url
+            if not url:
+                logger.debug("Dropping result with empty URL from query %r", query)
+                continue
+            if url in seen_urls:
+                logger.debug("Deduplicating URL (already seen): %s", url)
+                continue
+            seen_urls.add(url)
+            merged.append({
+                "url": url,
+                "title": result.title,
+                "snippet": result.snippet,
+                "published_date": result.published_date,
+                "source_query": result.source_query or query,
+            })
+            added += 1
+
+        logger.info("Query %r: %d new results (total so far: %d)", query, added, len(merged))
+
+    logger.info(
+        "search() complete — %d queries, %d unique results",
+        len(queries),
+        len(merged),
+    )
+    return merged
+
+
+def _search_tavily(
+    queries: list[str],
+    max_results: int,
+    api_key: Optional[str] = None,
+) -> list[dict]:
+    """Original Tavily-only implementation (kept intact for backward compat)."""
     client = _make_client(api_key)
     seen_urls: set[str] = set()
     merged: list[dict] = []
