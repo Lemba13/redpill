@@ -5,7 +5,7 @@ An autonomous agent that crawls the web daily for a given topic, deduplicates ag
 ## How it works
 
 1. **Plan** — Uses term history and user feedback signals from prior runs to generate targeted search queries via LLM (or falls back to deterministic term expansion). The base topic is always included.
-2. **Search** — Queries Tavily with the planned queries for broad coverage
+2. **Search** — Queries Tavily and/or Serper (Google) with the planned queries; fan-out mode hits both providers and merges results for broader coverage
 3. **Extract** — Fetches each URL and strips it down to main article text
 4. **Deduplicate** — Filters out previously seen articles by URL and semantic similarity
 5. **Summarize** — Sends new articles to a local Ollama LLM for structured summaries
@@ -17,7 +17,8 @@ An autonomous agent that crawls the web daily for a given topic, deduplicates ag
 ## Requirements
 
 - Python 3.11+
-- [Tavily API key](https://tavily.com) (free tier: 1000 searches/month)
+- [Tavily API key](https://tavily.com) (free tier: 1000 searches/month) — required unless `search_provider: "serper"`
+- [Serper API key](https://serper.dev) (free tier: 2500 queries one-time) — required when `search_provider` is `"serper"` or `"both"`
 - [Ollama](https://ollama.com) running locally with models pulled:
   - `ollama pull llama3.1:8b` (or your preferred summarization model)
   - `ollama pull qwen3.5:4b` (reasoning model for query planning — required if `query_planning.enabled: true`)
@@ -32,7 +33,7 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-Edit `config.yaml` with your topic and delivery settings. Fill in `.env` with your secrets — `.env.example` documents all available variables including `TAVILY_API_KEY`, `SMTP_PASSWORD`, and `HUGGINGFACE_HUB_VERBOSITY` (pre-set to silence a cosmetic HuggingFace auth warning for the public embedding model).
+Edit `config.yaml` with your topic and delivery settings. Fill in `.env` with your secrets — `.env.example` documents all available variables including `TAVILY_API_KEY`, `SERPER_API_KEY`, `SMTP_PASSWORD`, and `HUGGINGFACE_HUB_VERBOSITY` (pre-set to silence a cosmetic HuggingFace auth warning for the public embedding model).
 
 To use the feedback service, install its optional dependencies:
 
@@ -46,7 +47,8 @@ pip install -e ".[feedback]"
 |-----|-------------|
 | `topic` | What you want to track (e.g. `"contrastive learning"`) |
 | `search_queries` | Static query list — used when `query_planning.enabled: false` |
-| `max_results_per_query` | Results per query, max 20 (Tavily limit) |
+| `search_provider` | `"tavily"` (default), `"serper"`, or `"both"` (fan-out to both, merged results) |
+| `max_results_per_query` | Results per query — max 20 for Tavily, capped at 10 for Serper |
 | `dedup_similarity_threshold` | Semantic similarity cutoff (0.85 recommended) |
 | `delivery_method` | `"markdown"` saves a file, `"email"` sends to your inbox |
 | `ollama_config.model` | Ollama model to use (e.g. `llama3.1:8b`, `qwen3:4b`) |
