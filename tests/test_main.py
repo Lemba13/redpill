@@ -56,6 +56,7 @@ SAMPLE_CONFIG = {
     "dedup_similarity_threshold": 0.85,
     "delivery_method": "markdown",
     "output_dir": "data/digests",
+    "search_provider": "tavily",
     "ollama_config": {
         "base_url": "http://localhost:11434",
         "model": "qwen3:4b",
@@ -665,6 +666,102 @@ class TestRunPipeline:
             with pytest.raises(SystemExit) as exc_info:
                 run_pipeline()
         assert exc_info.value.code == 1
+
+    def test_serper_provider_without_api_key_exits_1(self) -> None:
+        """Fail fast when search_provider requires SERPER_API_KEY but it is absent."""
+        serper_config = {**SAMPLE_CONFIG, "search_provider": "serper"}
+        patches = self._patch_all(config=serper_config)
+        import os
+
+        with (
+            patches["load_config"],
+            patches["init_db"],
+            patches["check_ollama"],
+            patches["OllamaClient"],
+            patches["search"],
+            patches["extract_batch"],
+            patches["filter_new_items"],
+            patches["summarize_item"],
+            patches["generate_digest"],
+            patches["deliver"],
+            patches["add_item"],
+            patches["compute_embedding"],
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                run_pipeline()
+        assert exc_info.value.code == 1
+
+    def test_both_provider_without_api_key_exits_1(self) -> None:
+        """Fail fast when search_provider is 'both' but SERPER_API_KEY is absent."""
+        both_config = {**SAMPLE_CONFIG, "search_provider": "both"}
+        patches = self._patch_all(config=both_config)
+        import os
+
+        with (
+            patches["load_config"],
+            patches["init_db"],
+            patches["check_ollama"],
+            patches["OllamaClient"],
+            patches["search"],
+            patches["extract_batch"],
+            patches["filter_new_items"],
+            patches["summarize_item"],
+            patches["generate_digest"],
+            patches["deliver"],
+            patches["add_item"],
+            patches["compute_embedding"],
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                run_pipeline()
+        assert exc_info.value.code == 1
+
+    def test_invalid_search_provider_exits_1(self) -> None:
+        """An unrecognised search_provider value must exit 1 with a clear message."""
+        bad_config = {**SAMPLE_CONFIG, "search_provider": "bing"}
+        patches = self._patch_all(config=bad_config)
+
+        with (
+            patches["load_config"],
+            patches["init_db"],
+            patches["check_ollama"],
+            patches["OllamaClient"],
+            patches["search"],
+            patches["extract_batch"],
+            patches["filter_new_items"],
+            patches["summarize_item"],
+            patches["generate_digest"],
+            patches["deliver"],
+            patches["add_item"],
+            patches["compute_embedding"],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                run_pipeline()
+        assert exc_info.value.code == 1
+
+    def test_tavily_provider_with_key_present_does_not_exit(self) -> None:
+        """Default tavily provider must not require SERPER_API_KEY."""
+        patches = self._patch_all()  # SAMPLE_CONFIG has search_provider: "tavily"
+        import os
+
+        with (
+            patches["load_config"],
+            patches["init_db"],
+            patches["check_ollama"],
+            patches["OllamaClient"],
+            patches["search"],
+            patches["extract_batch"],
+            patches["filter_new_items"],
+            patches["summarize_item"],
+            patches["generate_digest"],
+            patches["deliver"],
+            patches["add_item"],
+            patches["compute_embedding"],
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            # Should complete without SystemExit even with no env vars
+            run_pipeline()
 
 
 # ---------------------------------------------------------------------------

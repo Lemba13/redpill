@@ -11,6 +11,11 @@ search_queries:
 
 max_results_per_query: 10
 
+# Search provider: "tavily" | "serper" | "both"
+# "both" fans out every query to both providers and merges results for broader coverage.
+# Requires SERPER_API_KEY in .env when set to "serper" or "both".
+search_provider: "both"
+
 dedup_similarity_threshold: 0.85
 
 db_path: "data/redpill.db"

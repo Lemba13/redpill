@@ -65,5 +65,18 @@ def extract_json(raw: str) -> dict | list | None:
             except json.JSONDecodeError:
                 pass
 
+    # Attempt 3: repair missing commas between adjacent JSON objects/arrays
+    # LLMs sometimes emit `} {` or `] [` without the separating comma.
+    repaired = re.sub(r'}\s*\{', '}, {', text)
+    repaired = re.sub(r']\s*\[', '], [', repaired)
+    for open_char, close_char in [('{', '}'), ('[', ']')]:
+        start = repaired.find(open_char)
+        end = repaired.rfind(close_char)
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(repaired[start: end + 1])
+            except json.JSONDecodeError:
+                pass
+
     logger.warning("extract_json: failed to parse JSON from LLM response: %r", text[:200])
     return None
