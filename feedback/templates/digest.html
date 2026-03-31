@@ -4,6 +4,11 @@
 <div class="header">
     <h1>{{ topic }} — {{ digest_date }}</h1>
     <p class="subtitle">{{ items | length }} items · Click thumbs to give feedback</p>
+    <p style="margin-top: 6px; font-size: 13px;">
+        <a href="/" class="back-link">← All digests</a>
+        &nbsp;·&nbsp;
+        <a href="/history" class="back-link">History →</a>
+    </p>
 </div>
 
 {% for item in items %}

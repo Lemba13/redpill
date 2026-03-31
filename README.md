@@ -146,6 +146,14 @@ nohup redpill-feedback > data/feedback.log 2>&1 &
 
 Then open `http://localhost:8080` after a pipeline run. Vote on items — once you reach `min_votes_for_signals` votes, the planner will start factoring in your preferences: boosting dimensions you upvote, deprioritizing ones you downvote, and preferring sources you engage with.
 
+The service exposes three pages:
+
+| Path | Description |
+|------|-------------|
+| `/` | List of all digests with item and vote counts |
+| `/digest/YYYY-MM-DD` | Individual digest — vote on items here (this is the link in digest emails) |
+| `/history` | All articles across every digest in a compact searchable view — filter by keyword, date range, or domain |
+
 The feedback service and the pipeline are fully decoupled — they share only the filesystem (`data/digests/*.json`) and `feedback.db`. The pipeline reads `feedback.db` in read-only mode. If the service is down, the pipeline continues unaffected.
 
 ## Smoke test
