@@ -333,6 +333,90 @@ class FeedbackDB:
         finally:
             conn.close()
 
+    def get_distinct_domains(self) -> list[str]:
+        """Return all distinct non-empty domains in digest_items, sorted."""
+        conn = _open(self._db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT domain
+                FROM digest_items
+                WHERE domain IS NOT NULL AND domain != ''
+                ORDER BY domain ASC
+                """,
+            ).fetchall()
+            return [row["domain"] for row in rows]
+        finally:
+            conn.close()
+
+    def get_history_items(
+        self,
+        *,
+        q: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        domain: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        """Return a page of digest items with vote status, filtered by optional criteria.
+
+        Returns {"items": list[dict], "has_next": bool}.
+        Fetches page_size+1 rows to detect whether a next page exists.
+        Items are ordered by digest_date DESC, relevance_score DESC.
+        """
+        conditions: list[str] = []
+        params: list = []
+
+        if q:
+            conditions.append("(di.title LIKE ? OR di.summary LIKE ?)")
+            like = f"%{q}%"
+            params.extend([like, like])
+        if from_date:
+            conditions.append("di.digest_date >= ?")
+            params.append(from_date)
+        if to_date:
+            conditions.append("di.digest_date <= ?")
+            params.append(to_date)
+        if domain:
+            conditions.append("di.domain = ?")
+            params.append(domain)
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        offset = (page - 1) * page_size
+        params.extend([page_size + 1, offset])
+
+        conn = _open(self._db_path)
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    di.item_id,
+                    di.digest_date,
+                    di.title,
+                    di.summary,
+                    di.url,
+                    di.domain,
+                    di.topic,
+                    di.key_insight,
+                    di.relevance_score,
+                    v.vote
+                FROM digest_items di
+                LEFT JOIN votes v ON di.item_id = v.item_id
+                {where}
+                ORDER BY di.digest_date DESC, di.relevance_score DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        items = [dict(row) for row in rows]
+        has_next = len(items) > page_size
+        return {"items": items[:page_size], "has_next": has_next}
+
     def get_available_digests(self) -> list[dict]:
         """Return digests that have been ingested, newest first.
 

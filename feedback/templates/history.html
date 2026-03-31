@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}RedPill — Article History{% endblock %}
+{% block content %}
+<div class="header">
+    <h1>Article History</h1>
+    <p class="subtitle">Every article that made it into a digest</p>
+    <a href="/" class="back-link">← All digests</a>
+</div>
+
+<form class="filter-bar" method="get" action="/history">
+    <input type="text" name="q" placeholder="Search titles and summaries" value="{{ q }}">
+    <input type="date" name="from" placeholder="From (YYYY-MM-DD)" value="{{ from_date }}">
+    <input type="date" name="to" placeholder="To (YYYY-MM-DD)" value="{{ to_date }}">
+    {% if domain_dropdown %}
+    <select name="domain">
+        <option value="">All domains</option>
+        {% for d in domains %}
+        <option value="{{ d }}" {% if d == domain %}selected{% endif %}>{{ d }}</option>
+        {% endfor %}
+    </select>
+    {% else %}
+    <input type="text" name="domain" placeholder="Domain filter" value="{{ domain }}">
+    {% endif %}
+    <button type="submit" class="filter-submit">Filter</button>
+    <a href="/history" class="filter-clear">Clear</a>
+</form>
+
+{% if not items_by_date %}
+<p class="results-summary">
+    {% if q or from_date or to_date or domain %}
+        No results for your filters.
+    {% else %}
+        No articles yet. Run the pipeline to generate your first digest.
+    {% endif %}
+</p>
+{% else %}
+
+<p class="results-summary">
+    {{ total_shown }} item{{ 's' if total_shown != 1 else '' }} across {{ items_by_date | length }} date{{ 's' if items_by_date | length != 1 else '' }} · Page {{ page }}
+</p>
+
+{% for group in items_by_date %}
+<div class="history-date-group">
+    <div class="history-date-header">{{ group.date }}</div>
+    {% for item in group.rows %}
+    <div class="history-row">
+        <span class="vote-badge {% if item.vote == 'up' %}up{% elif item.vote == 'down' %}down{% endif %}">
+            {%- if item.vote == 'up' %}↑{%- elif item.vote == 'down' %}↓{%- else %}&nbsp;{%- endif %}
+        </span>
+        {% if item.relevance_score is not none %}
+        <span class="score-badge" title="Relevance score">{{ item.relevance_score }}</span>
+        {% else %}
+        <span class="score-badge">&nbsp;&nbsp;</span>
+        {% endif %}
+        <div class="history-body">
+            <a class="history-title" href="{{ item.url }}" target="_blank" rel="noopener"
+               title="{{ item.title }}">{{ item.title }}</a>
+            <div class="history-insight">
+                {{ item.key_insight if item.key_insight else item.summary }}
+            </div>
+            <div class="history-domain">{{ item.domain }}</div>
+        </div>
+        <a class="history-source" href="{{ item.url }}" target="_blank" rel="noopener">↗</a>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+
+<div class="pagination">
+    <span>{% if prev_url %}<a href="{{ prev_url }}">← Previous</a>{% endif %}</span>
+    <span class="page-label">Page {{ page }}</span>
+    <span>{% if next_url %}<a href="{{ next_url }}">Next →</a>{% endif %}</span>
+</div>
+
+{% endif %}
+{% endblock %}

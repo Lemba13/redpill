@@ -19,9 +19,11 @@ only reads them.
 """
 
 import logging
+from itertools import groupby
 from pathlib import Path
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -60,6 +62,26 @@ def _discover_sidecar_dates() -> list[str]:
         reverse=True,
     )
     return dates
+
+
+def _ingest_all_sidecars() -> int:
+    """Ingest any sidecar on disk not yet loaded into feedback.db.
+
+    Returns the number of newly ingested dates.  Errors on individual
+    sidecars are logged and skipped — never raises.
+    """
+    ingested = 0
+    for date_str in _discover_sidecar_dates():
+        if db.is_digest_ingested(date_str):
+            continue
+        sidecar_path = _SIDECAR_DIR / f"{date_str}.json"
+        try:
+            count = db.ingest_digest(str(sidecar_path))
+            logger.info("Bulk-ingested %d item(s) for digest %s", count, date_str)
+            ingested += 1
+        except (ValueError, OSError) as exc:
+            logger.warning("Skipping sidecar %s during bulk ingest: %s", date_str, exc)
+    return ingested
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +155,69 @@ async def digest_page(date: str, request: Request) -> HTMLResponse:
             "digest_date": date,
             "topic": topic,
             "items": items,
+        },
+    )
+
+
+@app.get("/history", response_class=HTMLResponse)
+async def history_page(
+    request: Request,
+    page: int = 1,
+    q: str | None = None,
+    from_: str | None = Query(default=None, alias="from"),
+    to: str | None = None,
+    domain: str | None = None,
+) -> HTMLResponse:
+    """Browser-history-style view of all digest articles."""
+    page = max(1, page)
+
+    _ingest_all_sidecars()
+
+    domains = db.get_distinct_domains()
+    result = db.get_history_items(
+        q=q,
+        from_date=from_,
+        to_date=to,
+        domain=domain,
+        page=page,
+    )
+
+    # Group items by date — SQL guarantees digest_date DESC order so groupby is safe.
+    items_by_date = [
+        {"date": date, "rows": list(group)}
+        for date, group in groupby(result["items"], key=lambda r: r["digest_date"])
+    ]
+
+    def _history_url(p: int) -> str:
+        params: dict = {"page": p}
+        if q:
+            params["q"] = q
+        if from_:
+            params["from"] = from_
+        if to:
+            params["to"] = to
+        if domain:
+            params["domain"] = domain
+        return f"/history?{urlencode(params)}"
+
+    total_shown = sum(len(g["rows"]) for g in items_by_date)
+
+    return templates.TemplateResponse(
+        request,
+        "history.html",
+        {
+            "items_by_date": items_by_date,
+            "has_next": result["has_next"],
+            "page": page,
+            "prev_url": _history_url(page - 1) if page > 1 else None,
+            "next_url": _history_url(page + 1) if result["has_next"] else None,
+            "q": q or "",
+            "from_date": from_ or "",
+            "to_date": to or "",
+            "domain": domain or "",
+            "domains": domains,
+            "domain_dropdown": len(domains) <= 30,
+            "total_shown": total_shown,
         },
     )
 
