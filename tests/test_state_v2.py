@@ -100,7 +100,7 @@ class TestInitDbNewTables:
         cols = {row[1] for row in info}
         assert cols == {
             "id", "query_text", "run_date", "source", "topic",
-            "results_count", "new_items", "kept_items",
+            "results_count", "new_items", "kept_items", "dim_id",
         }
 
     def test_idempotent_on_existing_db(self):
@@ -383,7 +383,7 @@ class TestGetQueryPerformance:
         assert len(results) == 1
         assert set(results[0].keys()) == {
             "id", "query_text", "run_date", "source", "topic",
-            "results_count", "new_items", "kept_items",
+            "results_count", "new_items", "kept_items", "dim_id",
         }
 
     def test_stat_values_correct(self, conn):

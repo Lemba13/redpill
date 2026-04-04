@@ -140,7 +140,7 @@ class TestInitDb:
         column_names = {row[1] for row in info}
         assert column_names == {
             "id", "url", "title", "content_hash",
-            "embedding", "summary", "first_seen_date", "topic",
+            "embedding", "summary", "first_seen_date", "topic", "dim_id",
         }
 
 
@@ -340,7 +340,7 @@ class TestGetItemsSince:
         results = get_items_since_conn("2026-03-01", conn)
         assert len(results) == 1
         assert set(results[0].keys()) == {
-            "id", "url", "title", "content_hash", "summary", "first_seen_date", "topic"
+            "id", "url", "title", "content_hash", "summary", "first_seen_date", "topic", "dim_id"
         }
 
     def test_embedding_blob_not_exposed(self, conn):

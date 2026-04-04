@@ -49,7 +49,7 @@ from redpill.state import (
     store_extracted_terms,
     update_query_stats,
 )
-from redpill.summarize import OllamaClient, check_ollama, generate_digest, summarize_item
+from redpill.summarize import OllamaClient, PlannerLLMClient, check_ollama, generate_digest, summarize_item
 from redpill.term_extractor import extract_terms_batch
 
 logger = logging.getLogger(__name__)
@@ -197,6 +197,8 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     ollama_base_url: str = ollama_cfg.get("base_url", "http://localhost:11434")
     ollama_model: str = ollama_cfg.get("model", "qwen3:4b")
 
+    planner_cfg: dict = config.get("planner_llm", {})
+
     # Feedback config — fully merged with defaults so all keys are present.
     fb_cfg: dict = get_feedback_config(config)
     feedback_enabled: bool = bool(fb_cfg["enabled"])
@@ -251,6 +253,22 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
 
     llm_client = OllamaClient(base_url=ollama_base_url, model=ollama_model)
 
+    planner_client: OllamaClient | PlannerLLMClient
+    if use_planner and planner_cfg.get("model"):
+        planner_client = PlannerLLMClient(
+            base_url=planner_cfg.get("base_url", ollama_base_url),
+            model=planner_cfg["model"],
+            think=bool(planner_cfg.get("think", True)),
+            timeout=int(planner_cfg.get("timeout", 120)),
+        )
+        logger.info(
+            "Using PlannerLLMClient (model=%r, think=%s) for query planning",
+            planner_cfg["model"],
+            planner_cfg.get("think", True),
+        )
+    else:
+        planner_client = llm_client
+
     # ------------------------------------------------------------------
     # Step 1b: Load feedback signals (read-only, best-effort)
     # ------------------------------------------------------------------
@@ -291,7 +309,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
             planned_queries = plan_queries(
                 topic,
                 planner_conn,
-                llm_client,
+                planner_client,
                 max_queries=max_queries,
                 feedback_signals=feedback_signals,
                 min_votes_for_signals=min_votes_for_signals,
@@ -304,15 +322,15 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     else:
         # Backward-compat: wrap static queries as plain base-source dicts.
         planned_queries = [
-            {"query": q, "source": "base", "reasoning": "Static query from config."}
+            {"query": q, "source": "base", "reasoning": "Static query from config.", "dim_id": "dim_base"}
             for q in static_queries
         ]
 
     query_strings: list[str] = [pq["query"] for pq in planned_queries]
 
-    # Build a lookup from query string → plan_dimension name for sidecar annotation.
-    # Fallback/static queries don't have a meaningful dimension, so map to "".
+    # Build lookups from query string → plan_dimension name and dim_id.
     query_to_dimension: dict[str, str] = {}
+    query_to_dim_id: dict[str, str] = {}
     for pq in planned_queries:
         q = pq["query"]
         # The dimension name lives in "reasoning" for llm_planned queries
@@ -325,6 +343,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
             query_to_dimension[q] = m.group(1) if m else ""
         else:
             query_to_dimension[q] = ""
+        query_to_dim_id[q] = pq.get("dim_id") or "dim_fallback"
 
     logger.info(
         "Running %d search quer%s for topic %r ...",
@@ -338,7 +357,11 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     if not dry_run:
         for pq in planned_queries:
             try:
-                qid = log_query(pq["query"], today, pq["source"], topic, db_path=db_path)
+                qid = log_query(
+                    pq["query"], today, pq["source"], topic,
+                    db_path=db_path,
+                    dim_id=pq.get("dim_id"),
+                )
                 query_ids.append(qid)
             except Exception as exc:
                 logger.warning("Failed to log query %r: %s", pq["query"], exc)
@@ -370,11 +393,12 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
 
     merged = _merge_search_and_extract(candidates, extracted)
 
-    # Annotate each merged item with source_query (from search.py's passthrough)
-    # and plan_dimension (derived from query_to_dimension lookup).
+    # Annotate each merged item with source_query (from search.py's passthrough),
+    # plan_dimension (derived from query_to_dimension lookup), and dim_id.
     for item in merged:
         sq: str = item.get("source_query") or ""
         item["plan_dimension"] = query_to_dimension.get(sq, "")
+        item["dim_id"] = query_to_dim_id.get(sq, "dim_fallback")
 
     # ------------------------------------------------------------------
     # Step 5: Deduplicate
@@ -418,6 +442,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
             result["_snippet"] = item.get("snippet") or ""
             result["source_query"] = item.get("source_query") or ""
             result["plan_dimension"] = item.get("plan_dimension") or ""
+            result["dim_id"] = item.get("dim_id") or "dim_fallback"
             summarized.append(result)
         except Exception as exc:
             # Belt-and-suspenders: summarize_item is designed not to raise,
@@ -521,6 +546,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
             # Pop sidecar-only fields so they don't interfere with state persistence.
             s_item.pop("source_query", None)
             s_item.pop("plan_dimension", None)
+            dim_id_val: str = s_item.pop("dim_id", None) or "dim_fallback"
 
             title: str = s_item.get("title") or original.get("title") or ""
             summary: str = s_item.get("summary") or ""
@@ -537,6 +563,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
                     topic=topic,
                     db_path=db_path,
                     first_seen_date=today,
+                    dim_id=dim_id_val,
                 )
                 n_kept += 1
                 logger.debug("Persisted: %r", url)

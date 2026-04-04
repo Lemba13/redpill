@@ -15,6 +15,7 @@ digest_items:
     relevance_score INTEGER
     source_query   TEXT
     plan_dimension TEXT
+    dim_id         TEXT
     topic          TEXT
     PRIMARY KEY (item_id, digest_date)
 
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS digest_items (
     relevance_score INTEGER,
     source_query    TEXT,
     plan_dimension  TEXT,
+    dim_id          TEXT,
     topic           TEXT,
     PRIMARY KEY (item_id, digest_date)
 )
@@ -79,6 +81,11 @@ def _open(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_CREATE_DIGEST_ITEMS_SQL)
     conn.execute(_CREATE_VOTES_SQL)
+    # Safe migration for existing databases.
+    try:
+        conn.execute("ALTER TABLE digest_items ADD COLUMN dim_id TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     return conn
 
@@ -145,8 +152,9 @@ class FeedbackDB:
                     """
                     INSERT OR IGNORE INTO digest_items
                         (item_id, digest_date, title, summary, url, domain,
-                         key_insight, relevance_score, source_query, plan_dimension, topic)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         key_insight, relevance_score, source_query, plan_dimension,
+                         dim_id, topic)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.get("item_id", ""),
@@ -159,6 +167,7 @@ class FeedbackDB:
                         item.get("relevance_score"),
                         item.get("source_query"),
                         item.get("plan_dimension"),
+                        item.get("dim_id"),
                         topic,
                     ),
                 )
@@ -287,6 +296,7 @@ class FeedbackDB:
                     di.relevance_score,
                     di.source_query,
                     di.plan_dimension,
+                    di.dim_id,
                     di.topic,
                     v.vote
                 FROM digest_items di
@@ -320,6 +330,7 @@ class FeedbackDB:
                     di.domain,
                     di.source_query,
                     di.plan_dimension,
+                    di.dim_id,
                     di.topic,
                     di.relevance_score
                 FROM votes v
