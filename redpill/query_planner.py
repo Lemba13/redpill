@@ -42,6 +42,7 @@ Each returned query dict has:
     reasoning — human-readable explanation of why this query was chosen
 """
 
+import hashlib
 import json
 import logging
 from datetime import date as _date
@@ -82,11 +83,23 @@ _MAX_TERMS_IN_PROMPT = 20
 _QUERY_PERF_HISTORY_DAYS = 14
 
 
+def _compute_dim_id(canonical_name: str, topic: str) -> str:
+    """Return a stable dim_id for a named dimension within a topic.
+
+    Format: "dim_" + first 12 hex chars of SHA-256(canonical_name + topic).
+    Deterministic across runs — two runs with the same dimension name and topic
+    produce the same dim_id, allowing reward history to accumulate.
+    """
+    raw = (canonical_name + topic).encode("utf-8")
+    return "dim_" + hashlib.sha256(raw).hexdigest()[:12]
+
+
 def _base_query(topic: str) -> dict:
     return {
         "query": topic,
         "source": "base",
         "reasoning": "Base topic query — always included.",
+        "dim_id": "dim_base",
     }
 
 
@@ -354,6 +367,7 @@ def _parse_llm_queries(raw: str, topic: str, n_expected: int) -> list[dict]:
                 "query": query,
                 "source": "llm_planned",
                 "reasoning": reasoning.strip() if isinstance(reasoning, str) else "",
+                "dim_id": "dim_fallback",
             }
         )
 
@@ -542,7 +556,7 @@ def synthesize_queries(
     seen: set[str] = {topic.lower()}  # prevent base topic re-inclusion
     results: list[dict] = []
 
-    def _try_add(query: str, reasoning: str) -> bool:
+    def _try_add(query: str, reasoning: str, dim_id: str) -> bool:
         """Attempt to add a query; return True if added, False if duplicate/budget."""
         q = query.strip()
         if not q:
@@ -556,6 +570,7 @@ def synthesize_queries(
             "query": q,
             "source": "llm_planned",
             "reasoning": reasoning,
+            "dim_id": dim_id,
         })
         return True
 
@@ -569,13 +584,14 @@ def synthesize_queries(
         suggested = dim.get("suggested_queries", [])
         if not isinstance(suggested, list):
             continue
+        d_id = _compute_dim_id(name, topic)
         for sq in suggested:
             if not isinstance(sq, str):
                 continue
             reasoning = (
                 f"Dimension '{name}': priority={priority}, coverage={coverage}."
             )
-            _try_add(sq, reasoning)
+            _try_add(sq, reasoning, d_id)
             if len(results) >= budget:
                 break
 
@@ -597,6 +613,7 @@ def synthesize_queries(
         _try_add(
             query_candidate,
             f"New direction from research plan: {direction[:80]}",
+            "dim_fallback",
         )
 
     logger.debug(
@@ -649,6 +666,7 @@ def plan_queries_fallback(
                     f"High-frequency term '{term}' "
                     f"(seen {term_dict.get('frequency', 1)} time(s))."
                 ),
+                "dim_id": "dim_fallback",
             }
         )
 
@@ -715,6 +733,7 @@ def plan_queries(
         return [_base_query(topic)]
 
     today = _date.today().isoformat()
+
 
     # ------------------------------------------------------------------
     # Path 1: Two-stage decomposition (PlannerLLMClient with think=True)

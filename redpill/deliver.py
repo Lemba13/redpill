@@ -151,6 +151,7 @@ def write_digest_sidecar(
                 "relevance_score": int(item.get("relevance_score", 1)),
                 "source_query": item.get("source_query") or "",
                 "plan_dimension": item.get("plan_dimension") or "",
+                "dim_id": item.get("dim_id") or "",
             }
         )
 

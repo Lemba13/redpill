@@ -55,12 +55,12 @@ Public API:
     init_db(db_path: str) -> None
     is_url_seen(url: str, db_path: str) -> bool
     get_all_embeddings(db_path: str) -> list[tuple[int, np.ndarray]]
-    add_item(url, title, content_hash, embedding, summary, topic, db_path) -> None
+    add_item(url, title, content_hash, embedding, summary, topic, db_path, *, dim_id) -> None
     get_items_since(date: str, db_path: str) -> list[dict]
     store_extracted_terms(terms: list[dict], db_path: str) -> None
     get_recent_terms(topic: str, db_path: str, days: int = 30) -> list[dict]
     get_top_terms(topic: str, db_path: str, limit: int = 50) -> list[dict]
-    log_query(query_text: str, run_date: str, source: str, topic: str, db_path: str) -> int
+    log_query(query_text: str, run_date: str, source: str, topic: str, db_path: str, *, dim_id) -> int
     update_query_stats(query_id: int, results_count: int, new_items: int, kept_items: int, db_path: str) -> None
     get_query_performance(topic: str, db_path: str, days: int = 14) -> list[dict]
     save_research_plan(topic: str, run_date: str, plan: dict, db_path: str, reasoning_trace: str | None, source: str) -> int
@@ -70,12 +70,12 @@ Internal (for testing with an in-memory connection):
     init_db_conn(conn) -> None
     is_url_seen_conn(url, conn) -> bool
     get_all_embeddings_conn(conn) -> list[tuple[int, np.ndarray]]
-    add_item_conn(url, title, content_hash, embedding, summary, topic, conn) -> None
+    add_item_conn(url, title, content_hash, embedding, summary, topic, conn, *, dim_id) -> None
     get_items_since_conn(date, conn) -> list[dict]
     store_extracted_terms_conn(terms, conn) -> None
     get_recent_terms_conn(topic, days, conn) -> list[dict]
     get_top_terms_conn(topic, limit, conn) -> list[dict]
-    log_query_conn(query_text, run_date, source, topic, conn) -> int
+    log_query_conn(query_text, run_date, source, topic, conn, *, dim_id) -> int
     update_query_stats_conn(query_id, results_count, new_items, kept_items, conn) -> None
     get_query_performance_conn(topic, days, conn) -> list[dict]
     save_research_plan_conn(topic, run_date, plan, conn, reasoning_trace, source) -> int
@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS seen_items (
     embedding       BLOB,
     summary         TEXT NOT NULL DEFAULT '',
     first_seen_date TEXT NOT NULL,
-    topic           TEXT NOT NULL DEFAULT ''
+    topic           TEXT NOT NULL DEFAULT '',
+    dim_id          TEXT
 )
 """
 
@@ -132,7 +133,23 @@ CREATE TABLE IF NOT EXISTS query_log (
     topic           TEXT NOT NULL,
     results_count   INTEGER NOT NULL DEFAULT 0,
     new_items       INTEGER NOT NULL DEFAULT 0,
-    kept_items      INTEGER NOT NULL DEFAULT 0
+    kept_items      INTEGER NOT NULL DEFAULT 0,
+    dim_id          TEXT
+)
+"""
+
+_CREATE_DIMENSION_REGISTRY_SQL = """
+CREATE TABLE IF NOT EXISTS dimension_registry (
+    dim_id          TEXT PRIMARY KEY,
+    canonical_name  TEXT NOT NULL,
+    topic           TEXT NOT NULL,
+    embedding       BLOB,
+    hyde_abstract   TEXT,
+    pool            TEXT NOT NULL DEFAULT 'explore',
+    alpha           INTEGER NOT NULL DEFAULT 1,
+    beta            INTEGER NOT NULL DEFAULT 1,
+    run_count       INTEGER NOT NULL DEFAULT 0,
+    last_seen       DATE
 )
 """
 
@@ -245,6 +262,29 @@ def init_db_conn(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_EXTRACTED_TERMS_SQL)
     conn.execute(_CREATE_QUERY_LOG_SQL)
     conn.execute(_CREATE_RESEARCH_PLANS_SQL)
+    conn.execute(_CREATE_DIMENSION_REGISTRY_SQL)
+
+    # Safe migrations for existing databases — silently skip if column exists.
+    for _stmt in (
+        "ALTER TABLE query_log ADD COLUMN dim_id TEXT",
+        "ALTER TABLE seen_items ADD COLUMN dim_id TEXT",
+    ):
+        try:
+            conn.execute(_stmt)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+    # Permanent sentinel rows — always present regardless of LLM output.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO dimension_registry
+            (dim_id, canonical_name, topic, pool, alpha, beta, run_count)
+        VALUES
+            ('dim_fallback', 'deterministic fallback', '__system__', 'exploit', 0, 0, 0),
+            ('dim_base', 'base topic anchor', '__system__', 'exploit', 0, 0, 0)
+        """
+    )
+
     logger.debug("All tables initialised (or already exist)")
 
 
@@ -293,6 +333,7 @@ def add_item_conn(
     topic: str,
     conn: sqlite3.Connection,
     first_seen_date: str | None = None,
+    dim_id: str | None = None,
 ) -> None:
     """Insert a new item using INSERT OR IGNORE for idempotency.
 
@@ -307,11 +348,11 @@ def add_item_conn(
     conn.execute(
         """
         INSERT OR IGNORE INTO seen_items
-            (url, title, content_hash, embedding, summary, first_seen_date, topic)
+            (url, title, content_hash, embedding, summary, first_seen_date, topic, dim_id)
         VALUES
-            (?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (url, title, content_hash, blob, summary, first_seen_date, topic),
+        (url, title, content_hash, blob, summary, first_seen_date, topic, dim_id),
     )
     logger.debug("add_item: url=%r (INSERT OR IGNORE)", url)
 
@@ -326,7 +367,7 @@ def get_items_since_conn(
     """
     rows = conn.execute(
         """
-        SELECT id, url, title, content_hash, summary, first_seen_date, topic
+        SELECT id, url, title, content_hash, summary, first_seen_date, topic, dim_id
         FROM seen_items
         WHERE first_seen_date >= ?
         ORDER BY first_seen_date ASC, id ASC
@@ -374,12 +415,14 @@ def add_item(
     topic: str,
     db_path: str = DEFAULT_DB_PATH,
     first_seen_date: str | None = None,
+    dim_id: str | None = None,
 ) -> None:
     """Persist a new item. Safe to call more than once with the same URL."""
     with _open_conn(db_path) as conn:
         add_item_conn(
             url, title, content_hash, embedding, summary, topic, conn,
             first_seen_date=first_seen_date,
+            dim_id=dim_id,
         )
 
 
@@ -500,6 +543,7 @@ def log_query_conn(
     source: str,
     topic: str,
     conn: sqlite3.Connection,
+    dim_id: str | None = None,
 ) -> int:
     """Insert a new query log entry and return its row id.
 
@@ -513,6 +557,9 @@ def log_query_conn(
         One of: "base", "extracted_term", "llm_planned".
     topic:
         The topic this query belongs to (used for per-topic filtering).
+    dim_id:
+        The dimension identifier for this query (e.g. "dim_base", "dim_fallback",
+        or a hashed dim id from the planner). NULL for legacy rows.
 
     Returns
     -------
@@ -520,10 +567,10 @@ def log_query_conn(
     """
     cursor = conn.execute(
         """
-        INSERT INTO query_log (query_text, run_date, source, topic)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO query_log (query_text, run_date, source, topic, dim_id)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (query_text, run_date, source, topic),
+        (query_text, run_date, source, topic, dim_id),
     )
     row_id: int = cursor.lastrowid  # type: ignore[assignment]
     logger.debug("log_query_conn: logged query %r → id=%d", query_text, row_id)
@@ -577,7 +624,7 @@ def get_query_performance_conn(
     rows = conn.execute(
         """
         SELECT id, query_text, run_date, source, topic,
-               results_count, new_items, kept_items
+               results_count, new_items, kept_items, dim_id
         FROM query_log
         WHERE topic = ? AND run_date >= ?
         ORDER BY run_date DESC, id DESC
@@ -718,10 +765,11 @@ def log_query(
     source: str,
     topic: str,
     db_path: str = DEFAULT_DB_PATH,
+    dim_id: str | None = None,
 ) -> int:
     """Insert a query log entry and return its id."""
     with _open_conn(db_path) as conn:
-        return log_query_conn(query_text, run_date, source, topic, conn)
+        return log_query_conn(query_text, run_date, source, topic, conn, dim_id=dim_id)
 
 
 def update_query_stats(
