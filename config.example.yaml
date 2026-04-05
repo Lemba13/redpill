@@ -46,6 +46,11 @@ query_planning:
   enabled: false        # set to true once term history has been built up
   max_queries: 5        # total queries per run including base topic
   max_dimensions: 6     # max subtopics in the two-stage research plan
+  ucb_alpha: 1.0                 # UCB exploration constant
+  saturation_decay_days: 7       # half-life of saturation penalty (days)
+  saturation_penalty_weight: 0.3 # max saturation penalty magnitude
+  promotion_k: 3                 # consecutive successes for explore→exploit
+  mmr_lambda_floor: 0.3          # minimum lambda for MMR diversity filter
 
 # Research planner model — called once per run for topic decomposition.
 # Uses a reasoning model (think: true) when available for best results.

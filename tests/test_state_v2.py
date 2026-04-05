@@ -101,6 +101,7 @@ class TestInitDbNewTables:
         assert cols == {
             "id", "query_text", "run_date", "source", "topic",
             "results_count", "new_items", "kept_items", "dim_id",
+            "avg_relevance_score",
         }
 
     def test_idempotent_on_existing_db(self):
