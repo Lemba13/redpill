@@ -164,6 +164,14 @@ CREATE TABLE IF NOT EXISTS research_plans (
 )
 """
 
+_CREATE_TOPIC_SCAFFOLD_SQL = """
+CREATE TABLE IF NOT EXISTS topic_scaffold (
+    topic       TEXT PRIMARY KEY,
+    scaffold    TEXT NOT NULL,
+    created_at  DATE NOT NULL
+)
+"""
+
 # Keep the old name as an alias so existing callers (init_db_conn) are not broken
 _CREATE_TABLE_SQL = _CREATE_SEEN_ITEMS_SQL
 
@@ -171,6 +179,16 @@ _CREATE_TABLE_SQL = _CREATE_SEEN_ITEMS_SQL
 # ---------------------------------------------------------------------------
 # Embedding serialization
 # ---------------------------------------------------------------------------
+
+def serialize_embedding(arr: np.ndarray) -> bytes:
+    """Public alias for _serialize_embedding. Use this from other modules."""
+    return _serialize_embedding(arr)
+
+
+def deserialize_embedding(blob: bytes) -> np.ndarray:
+    """Public alias for _deserialize_embedding. Use this from other modules."""
+    return _deserialize_embedding(blob)
+
 
 def _serialize_embedding(arr: np.ndarray) -> bytes:
     """Serialize a numpy array to a self-describing byte sequence.
@@ -263,6 +281,7 @@ def init_db_conn(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_QUERY_LOG_SQL)
     conn.execute(_CREATE_RESEARCH_PLANS_SQL)
     conn.execute(_CREATE_DIMENSION_REGISTRY_SQL)
+    conn.execute(_CREATE_TOPIC_SCAFFOLD_SQL)
 
     # Safe migrations for existing databases — silently skip if column exists.
     for _stmt in (

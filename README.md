@@ -21,7 +21,7 @@ An autonomous agent that crawls the web daily for a given topic, deduplicates ag
 - [Serper API key](https://serper.dev) (free tier: 2500 queries one-time) — required when `search_provider` is `"serper"` or `"both"`
 - [Ollama](https://ollama.com) running locally with models pulled:
   - `ollama pull llama3.1:8b` (or your preferred summarization model)
-  - `ollama pull qwen3.5:4b` (reasoning model for query planning — required if `query_planning.enabled: true`)
+  - `ollama pull deepseek-r1:7b` (reasoning model for query planning — required if `query_planning.enabled: true`)
 
 ## Setup
 
@@ -56,9 +56,12 @@ pip install -e ".[feedback]"
 | `query_planning.enabled` | Enable LLM-driven query planning (default: `false`) |
 | `query_planning.max_queries` | Max queries per run including base topic (default: `5`) |
 | `query_planning.max_dimensions` | Max research dimensions in the two-stage plan (default: `6`) |
-| `planner_llm.model` | Reasoning model for topic decomposition (e.g. `qwen3.5:4b`) |
+| `query_planning.registry_resolution_threshold` | Cosine similarity threshold for merging dimensions into the registry (default: `0.88`) |
+| `query_planning.hyde_abstracts_per_dim` | Number of HyDE abstracts generated per new dimension (default: `3`) |
+| `query_planning.scaffold_registry_min_size` | Registry entries needed before switching from scaffold to full coverage map (default: `5`) |
+| `planner_llm.model` | Reasoning model for topic decomposition (e.g. `deepseek-r1:7b`) |
 | `planner_llm.think` | Enable extended chain-of-thought reasoning (default: `true`) |
-| `planner_llm.timeout` | Max seconds to wait for the planner LLM response (default: `300`) |
+| `planner_llm.timeout` | Max seconds to wait for the planner LLM response (default: `600`) |
 | `feedback.enabled` | Write JSON sidecars and embed feedback links in emails (default: `false`) |
 | `feedback.base_url` | URL where the feedback service is reachable (default: `http://localhost:8080`) |
 | `feedback.db_path` | Path to the feedback SQLite database (default: `data/feedback.db`) |
@@ -69,8 +72,12 @@ pip install -e ".[feedback]"
 
 When enabled, the pipeline runs a two-stage planner each run:
 
-1. **Stage 1 — Topic decomposition**: a reasoning LLM (`qwen3.5:4b` with `think: true`) analyzes the base topic, previous research plan, extracted terms, and query performance to produce a structured research plan with prioritized dimensions.
+1. **Stage 1 — Topic decomposition**: a reasoning LLM analyzes the base topic, previous research plan, extracted terms, query performance, and a coverage map of already-explored dimensions to produce a structured research plan. The prompt explicitly instructs the model to identify gaps and generate orthogonal dimensions rather than deepening already-covered areas.
 2. **Stage 2 — Query synthesis**: deterministic code converts the plan into concrete search queries, always anchoring on the base topic and prioritizing high-priority, under-explored dimensions.
+
+**Dimension registry** — each planned dimension is embedded using HyDE (Hypothetical Document Embeddings): the planner LLM writes a synthetic abstract for the dimension, which is encoded by `all-MiniLM-L6-v2` and stored in `dimension_registry`. On subsequent runs, new candidates are resolved against the registry by cosine similarity — dimensions that are semantically close enough (`registry_resolution_threshold`) reuse the existing entry rather than spawning a duplicate. This lets the system accumulate a stable identity for each research arm across runs.
+
+**Topic scaffold** — on first run, the planner generates a coverage scaffold that maps the topic into five axes (methodological, domain, evaluation, theoretical, application). This is cached in SQLite and used as a guide when the registry is still sparse, ensuring early runs span the full topic space rather than clustering in one corner.
 
 The research plan and reasoning trace are stored in SQLite and fed back into the next run, so the planner learns over time which angles yield new content and which are saturated.
 
@@ -81,12 +88,15 @@ query_planning:
   enabled: true
   max_queries: 5
   max_dimensions: 6
+  registry_resolution_threshold: 0.88
+  hyde_abstracts_per_dim: 3
+  scaffold_registry_min_size: 5
 
 planner_llm:
   base_url: "http://localhost:11434"
-  model: "qwen3.5:4b"
+  model: "deepseek-r1:7b"
   think: true
-  timeout: 300
+  timeout: 600
 ```
 
 ### Email delivery (Gmail example)

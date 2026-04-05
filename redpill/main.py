@@ -192,6 +192,9 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     qp_cfg: dict = config.get("query_planning", {})
     use_planner: bool = bool(qp_cfg.get("enabled", False))
     max_queries: int = int(qp_cfg.get("max_queries", 5))
+    registry_resolution_threshold: float = float(qp_cfg.get("registry_resolution_threshold", 0.88))
+    hyde_abstracts_per_dim: int = int(qp_cfg.get("hyde_abstracts_per_dim", 3))
+    scaffold_registry_min_size: int = int(qp_cfg.get("scaffold_registry_min_size", 5))
 
     ollama_cfg: dict = config.get("ollama_config", {})
     ollama_base_url: str = ollama_cfg.get("base_url", "http://localhost:11434")
@@ -313,6 +316,9 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
                 max_queries=max_queries,
                 feedback_signals=feedback_signals,
                 min_votes_for_signals=min_votes_for_signals,
+                registry_resolution_threshold=registry_resolution_threshold,
+                hyde_abstracts_per_dim=hyde_abstracts_per_dim,
+                scaffold_registry_min_size=scaffold_registry_min_size,
             )
         except Exception as exc:
             logger.warning("Query planner raised unexpectedly (%s) — using fallback", exc)
