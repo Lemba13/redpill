@@ -1,0 +1,191 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="redpill architecture" id="redpill-arch">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ── CONFIG ── -->
+        <mxCell id="10" value="Configuration" style="swimlane;fontStyle=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="450" y="20" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="config.yaml&#xa;(topic, queries, LLM, search provider, delivery)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="10">
+          <mxGeometry x="30" y="35" width="240" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- ── QUERY PLANNING ── -->
+        <mxCell id="20" value="Query Planning" style="swimlane;fontStyle=1;startSize=30;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="80" y="160" width="760" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="21" value="FeedbackReader&#xa;(read-only signals from feedback.db)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="20">
+          <mxGeometry x="20" y="50" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="Dimension Registry&#xa;(HyDE embeddings via PlannerLLMClient)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="20">
+          <mxGeometry x="20" y="140" width="170" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="plan_queries()&#xa;two-stage LLM decompose → synthesize&#xa;↳ single-stage LLM fallback&#xa;↳ term-expansion fallback" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="20">
+          <mxGeometry x="240" y="80" width="200" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="24" value="Bandit / UCB Selection&#xa;(exploit: UCB + saturation penalty&#xa;explore: coverage-gap scoring)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="20">
+          <mxGeometry x="490" y="50" width="190" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="25" value="MMR Diversity Filter&#xa;(cosine similarity, adaptive λ)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="20">
+          <mxGeometry x="490" y="150" width="190" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- planner internal edges -->
+        <mxCell id="p1" value="preference signals" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="21" target="23" parent="20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" value="dim embeddings + scaffold" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="22" target="23" parent="20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="23" target="24" parent="20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="24" target="25" parent="20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ── SEARCH ── -->
+        <mxCell id="30" value="Search" style="swimlane;fontStyle=1;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="300" y="450" width="360" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="31" value="Search Providers&#xa;Tavily / Serper / FanOut" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="30">
+          <mxGeometry x="70" y="33" width="220" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- ── EXTRACTION ── -->
+        <mxCell id="40" value="Extraction" style="swimlane;fontStyle=1;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="300" y="590" width="360" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="41" value="extract_batch()&#xa;trafilatura + requests (5 workers, 10s timeout)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="40">
+          <mxGeometry x="40" y="33" width="280" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- ── DEDUPLICATION ── -->
+        <mxCell id="50" value="Deduplication" style="swimlane;fontStyle=1;startSize=30;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="300" y="730" width="360" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="51" value="filter_new_items()&#xa;Pass 1: URL exact-match | Pass 2: MiniLM-L6-v2 similarity" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="50">
+          <mxGeometry x="20" y="33" width="320" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- ── SUMMARIZATION ── -->
+        <mxCell id="60" value="Summarization &amp; Term Extraction" style="swimlane;fontStyle=1;startSize=30;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="130" y="870" width="620" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="61" value="summarize_item()&#xa;OllamaClient → JSON&#xa;{title, summary, key_insight, relevance_score}" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="60">
+          <mxGeometry x="15" y="45" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="62" value="extract_terms_batch()&#xa;OllamaClient → domain terms&#xa;(relevance ≥ 3 only)" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="60">
+          <mxGeometry x="220" y="45" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="63" value="generate_digest()&#xa;Markdown, sorted by relevance" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="60">
+          <mxGeometry x="425" y="45" width="180" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- summarize internal edges -->
+        <mxCell id="s1" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="61" target="62" parent="60">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="61" target="63" parent="60">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ── DELIVERY ── -->
+        <mxCell id="70" value="Delivery" style="swimlane;fontStyle=1;startSize=30;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="250" y="1070" width="420" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="71" value="deliver()&#xa;Markdown file or SMTP email" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="70">
+          <mxGeometry x="15" y="40" width="175" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="72" value="write_digest_sidecar()&#xa;data/digests/{date}.json" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="70">
+          <mxGeometry x="230" y="40" width="175" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- delivery internal edge -->
+        <mxCell id="dv1" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="71" target="72" parent="70">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ── STATE DB ── -->
+        <mxCell id="80" value="SQLite State DB (redpill.db)" style="swimlane;fontStyle=1;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="990" y="460" width="240" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="81" value="seen_items&#xa;extracted_terms&#xa;query_log&#xa;research_plans&#xa;topic_scaffold&#xa;dimension_registry&#xa;llm_call_log" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;" vertex="1" parent="80">
+          <mxGeometry x="25" y="45" width="190" height="290" as="geometry" />
+        </mxCell>
+
+        <!-- ── FEEDBACK ── -->
+        <mxCell id="90" value="Feedback Service (FastAPI)" style="swimlane;fontStyle=1;startSize=30;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="990" y="880" width="240" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="91" value="GET / — digest listing&#xa;GET /digest/{date} — vote UI&#xa;GET /history — filtered history&#xa;POST /api/vote — record vote" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="90">
+          <mxGeometry x="10" y="40" width="220" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="92" value="feedback.db&#xa;votes + ingested digests" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;" vertex="1" parent="90">
+          <mxGeometry x="45" y="120" width="150" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- feedback internal edge -->
+        <mxCell id="fb1" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="91" target="92" parent="90">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ══ MAIN PIPELINE EDGES ══ -->
+        <mxCell id="e1" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="11" target="20" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="11" target="30" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="planned query strings" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="25" target="31" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="URLs + snippets" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="31" target="41" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="content" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="41" target="51" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="new items" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="51" target="61" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="63" target="71" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="JSON sidecar" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="72" target="91" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="vote signals" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;" edge="1" source="92" target="21" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ══ STATE DB EDGES (dashed) ══ -->
+        <mxCell id="d1" value="extracted terms" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;endArrow=block;endFill=0;" edge="1" source="62" target="81" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="URL / embedding check" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;endArrow=block;endFill=0;" edge="1" source="51" target="81" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="llm_call_log" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;endArrow=block;endFill=0;" edge="1" source="61" target="81" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" value="UCB stats + pool transitions" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;endArrow=block;endFill=0;" edge="1" source="24" target="81" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d5" value="add_item + update_query_stats" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;endArrow=block;endFill=0;" edge="1" source="71" target="81" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d6" value="term history + query perf" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;endArrow=block;endFill=0;" edge="1" source="81" target="23" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="d7" value="dim embeddings + pool state" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=10;endArrow=block;endFill=0;" edge="1" source="81" target="24" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

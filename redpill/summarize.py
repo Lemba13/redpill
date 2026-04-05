@@ -116,6 +116,17 @@ class OllamaClient:
         URL of the Ollama HTTP API (default: http://localhost:11434).
     model:
         Name of the pulled Ollama model to use (default: qwen3:4b).
+
+    Attributes
+    ----------
+    last_thinking:
+        Set after each generate() call.  Contains the extracted
+        ``<think>...</think>`` block text when qwen3 emits one, or
+        ``response.message.thinking`` when Ollama exposes it natively.
+        ``None`` when no thinking block was present.
+    last_raw_response:
+        The unmodified string returned by Ollama, before think-block
+        stripping.  Available after each generate() call.
     """
 
     def __init__(
@@ -126,6 +137,8 @@ class OllamaClient:
         self._model = model
         self._base_url = base_url
         self._client = ollama.Client(host=base_url)
+        self.last_thinking: str | None = None
+        self.last_raw_response: str | None = None
 
     def generate(self, prompt: str, system: str | None = None) -> str:
         """Call ollama.chat() and return the assistant message content.
@@ -135,6 +148,10 @@ class OllamaClient:
         exception type to handle. Connection failures surface as RuntimeError
         too, wrapping the underlying httpx.ConnectError.
 
+        After each successful call ``last_raw_response`` holds the unmodified
+        content string and ``last_thinking`` holds the extracted reasoning
+        trace (or None when not present).
+
         Parameters
         ----------
         prompt:
@@ -143,6 +160,11 @@ class OllamaClient:
             Optional system prompt. When provided, it is sent as the first
             message with role="system".
         """
+        import re as _re
+
+        self.last_thinking = None
+        self.last_raw_response = None
+
         messages: list[dict] = []
         if system is not None:
             messages.append({"role": "system", "content": system})
@@ -173,7 +195,24 @@ class OllamaClient:
             raise RuntimeError(f"Ollama request timed out: {exc}") from exc
 
         content: str = response.message.content or ""
-        logger.debug("OllamaClient.generate: received %d chars", len(content))
+        self.last_raw_response = content
+
+        # Capture thinking trace.  Prefer the native Ollama field; fall back
+        # to extracting from inline <think>...</think> blocks.
+        thinking: str | None = getattr(response.message, "thinking", None)
+        if thinking:
+            self.last_thinking = thinking
+        elif "<think>" in content:
+            m = _re.search(r"<think>(.*?)</think>", content, _re.DOTALL)
+            if m:
+                self.last_thinking = m.group(1).strip()
+            content = strip_think_blocks(content).strip()
+
+        logger.debug(
+            "OllamaClient.generate: received %d chars (thinking=%s)",
+            len(content),
+            "yes" if self.last_thinking else "no",
+        )
         return content
 
 
@@ -447,7 +486,12 @@ def _validate_summary(data: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def summarize_item(item: dict, topic: str, client: LLMClient) -> dict:
+def summarize_item(
+    item: dict,
+    topic: str,
+    client: LLMClient,
+    db_path: str | None = None,
+) -> dict:
     """Summarize one article item using the provided LLM client.
 
     The input *item* dict must have at minimum:
@@ -469,6 +513,10 @@ def summarize_item(item: dict, topic: str, client: LLMClient) -> dict:
         The research topic (used in the prompt so the LLM can score relevance).
     client:
         Any LLMClient implementation.
+    db_path:
+        When provided, the raw LLM response (and thinking trace, if any) are
+        written to the llm_call_log table in this database.  Pass None to
+        skip logging (default, so existing callers are unaffected).
 
     Returns
     -------
@@ -496,6 +544,19 @@ def summarize_item(item: dict, topic: str, client: LLMClient) -> dict:
     except RuntimeError as exc:
         logger.error("summarize_item: LLM call failed for url=%r: %s", url, exc)
         return {**_FALLBACK_SUMMARY, "url": url}
+
+    # Persist raw response for debugging / analysis.
+    if db_path is not None:
+        from redpill.state import log_llm_call
+        log_llm_call(
+            call_site="summarize_item",
+            raw_response=getattr(client, "last_raw_response", None) or raw,
+            db_path=db_path,
+            model=getattr(client, "_model", None),
+            topic=topic,
+            prompt_len=len(prompt),
+            thinking=getattr(client, "last_thinking", None),
+        )
 
     parsed = _extract_json(raw)
     if not parsed:

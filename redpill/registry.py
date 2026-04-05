@@ -93,6 +93,7 @@ def generate_hyde_abstract(
     dimension_name: str,
     topic: str,
     ollama_client: "PlannerLLMClient",
+    conn: "sqlite3.Connection | None" = None,
 ) -> str:
     """Call the planner LLM to produce a ~150-word hypothetical abstract.
 
@@ -101,6 +102,12 @@ def generate_hyde_abstract(
 
     Raises RuntimeError on LLM failure — do not swallow. A bad embedding
     is worse than no embedding.
+
+    Parameters
+    ----------
+    conn:
+        When provided, the raw LLM response is logged to llm_call_log.
+        Pass None to skip logging (default).
     """
     prompt = (
         "Write a 150-word abstract for a research paper that represents the kind of\n"
@@ -125,6 +132,22 @@ def generate_hyde_abstract(
         think_override=False,
         json_format=False,
     )
+
+    if conn is not None:
+        from redpill.state import log_llm_call_conn
+        try:
+            log_llm_call_conn(
+                call_site="generate_hyde_abstract",
+                raw_response=raw,
+                conn=conn,
+                model=getattr(ollama_client, "_model", None),
+                topic=topic,
+                prompt_len=len(prompt),
+                thinking=None,  # think_override=False — no reasoning trace
+            )
+        except Exception as _exc:
+            logger.warning("generate_hyde_abstract: failed to log LLM call: %s", _exc)
+
     text = _PREAMBLE_RE.sub("", raw.strip()).strip()
     return text
 
@@ -168,7 +191,7 @@ def register_dimension(
     abstracts: list[str] = []
 
     for i in range(n_abstracts):
-        abstract = generate_hyde_abstract(canonical_name, topic, ollama_client)
+        abstract = generate_hyde_abstract(canonical_name, topic, ollama_client, conn=conn)
         abstracts.append(abstract)
         emb = embed_hyde_abstract(abstract)
         embeddings.append(emb)
@@ -221,7 +244,7 @@ def resolve_or_register(
 
     Returns dim_id in both cases.
     """
-    abstract = generate_hyde_abstract(candidate_str, topic, ollama_client)
+    abstract = generate_hyde_abstract(candidate_str, topic, ollama_client, conn=conn)
     query_vec = embed_hyde_abstract(abstract)
 
     registry = get_all_registry_embeddings(conn)
@@ -443,6 +466,25 @@ def generate_topic_scaffold(
     )
 
     raw = ollama_client.generate(prompt, system=_SCAFFOLD_SYSTEM_PROMPT)
+
+    # Capture reasoning trace before parsing — store it with the scaffold row.
+    scaffold_thinking: str | None = getattr(ollama_client, "last_thinking", None)
+
+    # Log to llm_call_log.
+    from redpill.state import log_llm_call_conn
+    try:
+        log_llm_call_conn(
+            call_site="generate_topic_scaffold",
+            raw_response=raw,
+            conn=conn,
+            model=getattr(ollama_client, "_model", None),
+            topic=topic,
+            prompt_len=len(prompt),
+            thinking=scaffold_thinking,
+        )
+    except Exception as _exc:
+        logger.warning("generate_topic_scaffold: failed to log LLM call: %s", _exc)
+
     parsed = extract_json(raw)
 
     _SCAFFOLD_KEYS = ("methodological", "domain", "evaluation", "theoretical", "application")
@@ -463,10 +505,11 @@ def generate_topic_scaffold(
     today = _date.today().isoformat()
     conn.execute(
         """
-        INSERT OR REPLACE INTO topic_scaffold (topic, scaffold, created_at)
-        VALUES (?, ?, ?)
+        INSERT OR REPLACE INTO topic_scaffold
+            (topic, scaffold, created_at, scaffold_reasoning_trace)
+        VALUES (?, ?, ?, ?)
         """,
-        (topic, scaffold_json, today),
+        (topic, scaffold_json, today, scaffold_thinking),
     )
     logger.info("generate_topic_scaffold: generated and stored scaffold for %r", topic)
     return parsed
