@@ -319,6 +319,11 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
                 registry_resolution_threshold=registry_resolution_threshold,
                 hyde_abstracts_per_dim=hyde_abstracts_per_dim,
                 scaffold_registry_min_size=scaffold_registry_min_size,
+                ucb_alpha=float(qp_cfg.get("ucb_alpha", 1.0)),
+                promotion_k=int(qp_cfg.get("promotion_k", 3)),
+                mmr_lambda_floor=float(qp_cfg.get("mmr_lambda_floor", 0.3)),
+                saturation_decay_days=int(qp_cfg.get("saturation_decay_days", 7)),
+                saturation_penalty_weight=float(qp_cfg.get("saturation_penalty_weight", 0.3)),
             )
         except Exception as exc:
             logger.warning("Query planner raised unexpectedly (%s) — using fallback", exc)
@@ -580,20 +585,91 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
                     exc,
                 )
 
-        # Final query stats update with kept_items count.
+        # Final query stats update — per-dim kept_items and avg_relevance_score.
+        # Note: dim_id and source_query are popped from s_item in the persist loop
+        # above, so re-derive dim_id from source_query via merged_by_url.
+        kept_per_dim_id: dict[str, int] = {}
+        relevance_per_dim_id: dict[str, list[float]] = {}
+        for s_item in summarized:
+            url = s_item.get("url", "")
+            original = merged_by_url.get(url, {})
+            sq = original.get("source_query") or ""
+            did = query_to_dim_id.get(sq, "dim_fallback")
+            kept_per_dim_id[did] = kept_per_dim_id.get(did, 0) + 1
+            rel = s_item.get("relevance_score")
+            if rel is not None:
+                relevance_per_dim_id.setdefault(did, []).append(float(rel))
+
+        # Build query_id → dim_id mapping for per-dim stats write.
+        qid_to_dim: dict[int, str] = {
+            qid: pq.get("dim_id", "dim_fallback")
+            for qid, pq in zip(query_ids, planned_queries)
+            if qid >= 0
+        }
+
         for qid in query_ids:
             if qid < 0:
                 continue
             try:
+                did = qid_to_dim.get(qid, "dim_fallback")
+                rel_list = relevance_per_dim_id.get(did)
+                avg_rel = sum(rel_list) / len(rel_list) if rel_list else None
                 update_query_stats(
                     qid,
                     results_count=len(candidates),
                     new_items=len(new_items),
-                    kept_items=n_kept,
+                    kept_items=kept_per_dim_id.get(did, 0),
+                    avg_relevance_score=avg_rel,
                     db_path=db_path,
                 )
             except Exception as exc:
                 logger.warning("Failed to finalize query stats for id=%d: %s", qid, exc)
+
+        # End-of-run bandit update: rewards, run_count, pool transitions.
+        if use_planner:
+            try:
+                from redpill.bandit import (
+                    check_promotions as _check_promotions,
+                    check_retirements as _check_retirements,
+                    update_rewards as _update_rewards,
+                )
+                bandit_conn = sqlite3.connect(db_path)
+                bandit_conn.row_factory = sqlite3.Row
+                try:
+                    run_results = [
+                        {
+                            "dim_id": did,
+                            "kept_items": kept_per_dim_id.get(did, 0),
+                            "avg_relevance_score": (
+                                sum(relevance_per_dim_id[did]) / len(relevance_per_dim_id[did])
+                                if relevance_per_dim_id.get(did) else 0.0
+                            ),
+                        }
+                        for did in {pq.get("dim_id", "dim_fallback") for pq in planned_queries}
+                        if did not in ("dim_fallback", "dim_base")
+                    ]
+                    _update_rewards(run_results, bandit_conn, topic)
+                    bandit_conn.execute(
+                        """
+                        UPDATE dimension_registry
+                        SET run_count = run_count + 1, last_seen = date('now')
+                        WHERE dim_id IN (
+                            SELECT DISTINCT dim_id FROM query_log
+                            WHERE run_date = ? AND topic = ?
+                        )
+                        """,
+                        (today, topic),
+                    )
+                    _check_promotions(bandit_conn, topic, k=int(qp_cfg.get("promotion_k", 3)))
+                    _check_retirements(bandit_conn, topic)
+                    bandit_conn.commit()
+                except Exception as exc:
+                    logger.warning("Bandit end-of-run update failed: %s", exc)
+                    bandit_conn.rollback()
+                finally:
+                    bandit_conn.close()
+            except ImportError:
+                pass
 
     logger.info("Pipeline complete.")
 
@@ -664,6 +740,7 @@ def _cmd_plan(args: argparse.Namespace) -> None:
     db_path: str = config.get("db_path", DEFAULT_DB_PATH)
     qp_cfg: dict = config.get("query_planning", {})
     max_queries: int = args.max_queries or int(qp_cfg.get("max_queries", 5))
+    ucb_alpha: float = float(qp_cfg.get("ucb_alpha", 1.0))
 
     ollama_cfg: dict = config.get("ollama_config", {})
     ollama_base_url: str = ollama_cfg.get("base_url", "http://localhost:11434")
@@ -688,6 +765,56 @@ def _cmd_plan(args: argparse.Namespace) -> None:
             queries = plan_queries(topic, conn, llm_client, max_queries=max_queries)
         else:
             queries = plan_queries_fallback(topic, conn, max_queries=max_queries)
+
+        # Show bandit pool state if available.
+        try:
+            from redpill.bandit import (
+                compute_budget_split,
+                compute_saturation_penalty,
+                compute_ucb_scores,
+                get_exploit_pool,
+                get_explore_pool,
+            )
+            from redpill.registry import get_dimension_axis_tags
+
+            exploit_dims = get_exploit_pool(conn, topic)
+            explore_dims = get_explore_pool(conn, topic)
+
+            print(f"\nPool state for topic: {topic!r}")
+            print(f"  Exploit pool: {len(exploit_dims)} dim(s)")
+            print(f"  Explore pool: {len(explore_dims)} dim(s)\n")
+
+            if exploit_dims:
+                scores = compute_ucb_scores(exploit_dims, conn, topic, alpha=ucb_alpha)
+                print("Exploit pool (UCB selection):")
+                for dim in sorted(exploit_dims, key=lambda d: scores.get(d["dim_id"], 0), reverse=True):
+                    did = dim["dim_id"]
+                    score = scores.get(did, 0)
+                    penalty = compute_saturation_penalty(did, conn)
+                    sat_note = "  ← saturated" if penalty > 0.15 else ""
+                    score_str = "inf" if score == float("inf") else f"{score:.3f}"
+                    print(
+                        f"  {did}  {dim['canonical_name']!r:<40} "
+                        f"score={score_str}  runs={dim['run_count']}  penalty={penalty:.2f}{sat_note}"
+                    )
+
+            if explore_dims:
+                print("\nExplore pool (coverage-gap selection):")
+                for dim in explore_dims:
+                    did = dim["dim_id"]
+                    axis_info = get_dimension_axis_tags(did, topic, conn)
+                    print(
+                        f"  {did}  {dim['canonical_name']!r:<40} "
+                        f"axis={axis_info.get('primary_axis', 'unknown')}  "
+                        f"last_seen={dim['last_seen'] or 'never'}"
+                    )
+
+            n_exploit, n_explore = compute_budget_split(max_queries, conn, topic)
+            print(f"\nBudget split: {n_exploit} exploit + {n_explore} explore "
+                  f"+ 1 base = {n_exploit + n_explore + 1} total\n")
+        except Exception as exc:
+            logger.debug("Could not show bandit pool state: %s", exc)
+
     finally:
         conn.close()
 

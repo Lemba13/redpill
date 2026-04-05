@@ -126,15 +126,16 @@ CREATE TABLE IF NOT EXISTS extracted_terms (
 
 _CREATE_QUERY_LOG_SQL = """
 CREATE TABLE IF NOT EXISTS query_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    query_text      TEXT NOT NULL,
-    run_date        DATE NOT NULL,
-    source          TEXT NOT NULL,
-    topic           TEXT NOT NULL,
-    results_count   INTEGER NOT NULL DEFAULT 0,
-    new_items       INTEGER NOT NULL DEFAULT 0,
-    kept_items      INTEGER NOT NULL DEFAULT 0,
-    dim_id          TEXT
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_text          TEXT NOT NULL,
+    run_date            DATE NOT NULL,
+    source              TEXT NOT NULL,
+    topic               TEXT NOT NULL,
+    results_count       INTEGER NOT NULL DEFAULT 0,
+    new_items           INTEGER NOT NULL DEFAULT 0,
+    kept_items          INTEGER NOT NULL DEFAULT 0,
+    dim_id              TEXT,
+    avg_relevance_score REAL
 )
 """
 
@@ -168,6 +169,14 @@ _CREATE_TOPIC_SCAFFOLD_SQL = """
 CREATE TABLE IF NOT EXISTS topic_scaffold (
     topic       TEXT PRIMARY KEY,
     scaffold    TEXT NOT NULL,
+    created_at  DATE NOT NULL
+)
+"""
+
+_CREATE_TOPIC_EMBEDDINGS_SQL = """
+CREATE TABLE IF NOT EXISTS topic_embeddings (
+    topic       TEXT PRIMARY KEY,
+    embedding   BLOB NOT NULL,
     created_at  DATE NOT NULL
 )
 """
@@ -282,11 +291,13 @@ def init_db_conn(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_RESEARCH_PLANS_SQL)
     conn.execute(_CREATE_DIMENSION_REGISTRY_SQL)
     conn.execute(_CREATE_TOPIC_SCAFFOLD_SQL)
+    conn.execute(_CREATE_TOPIC_EMBEDDINGS_SQL)
 
     # Safe migrations for existing databases — silently skip if column exists.
     for _stmt in (
         "ALTER TABLE query_log ADD COLUMN dim_id TEXT",
         "ALTER TABLE seen_items ADD COLUMN dim_id TEXT",
+        "ALTER TABLE query_log ADD COLUMN avg_relevance_score REAL",
     ):
         try:
             conn.execute(_stmt)
@@ -602,6 +613,7 @@ def update_query_stats_conn(
     new_items: int,
     kept_items: int,
     conn: sqlite3.Connection,
+    avg_relevance_score: float | None = None,
 ) -> None:
     """Update the stats columns for an existing query_log row.
 
@@ -615,18 +627,21 @@ def update_query_stats_conn(
         How many survived deduplication.
     kept_items:
         How many made it into the final digest.
+    avg_relevance_score:
+        Average relevance score (1–5) across kept items for this dim, or None.
     """
     conn.execute(
         """
         UPDATE query_log
-        SET results_count = ?, new_items = ?, kept_items = ?
+        SET results_count = ?, new_items = ?, kept_items = ?,
+            avg_relevance_score = ?
         WHERE id = ?
         """,
-        (results_count, new_items, kept_items, query_id),
+        (results_count, new_items, kept_items, avg_relevance_score, query_id),
     )
     logger.debug(
-        "update_query_stats_conn: id=%d results=%d new=%d kept=%d",
-        query_id, results_count, new_items, kept_items,
+        "update_query_stats_conn: id=%d results=%d new=%d kept=%d avg_rel=%s",
+        query_id, results_count, new_items, kept_items, avg_relevance_score,
     )
 
 
@@ -797,10 +812,14 @@ def update_query_stats(
     new_items: int,
     kept_items: int,
     db_path: str = DEFAULT_DB_PATH,
+    avg_relevance_score: float | None = None,
 ) -> None:
     """Update stats on an existing query_log row."""
     with _open_conn(db_path) as conn:
-        update_query_stats_conn(query_id, results_count, new_items, kept_items, conn)
+        update_query_stats_conn(
+            query_id, results_count, new_items, kept_items, conn,
+            avg_relevance_score=avg_relevance_score,
+        )
 
 
 def get_query_performance(
@@ -841,3 +860,68 @@ def get_latest_research_plan(
     """
     with _open_conn(db_path) as conn:
         return get_latest_research_plan_conn(topic, conn)
+
+
+# ---------------------------------------------------------------------------
+# topic_embeddings — internal implementations
+# ---------------------------------------------------------------------------
+
+def get_topic_embedding_conn(
+    topic: str,
+    conn: sqlite3.Connection,
+) -> "np.ndarray | None":
+    """Return the stored HyDE embedding for *topic*, or None if not present."""
+    row = conn.execute(
+        "SELECT embedding FROM topic_embeddings WHERE topic = ?", (topic,)
+    ).fetchone()
+    if row is None or row["embedding"] is None:
+        return None
+    try:
+        return _deserialize_embedding(row["embedding"])
+    except Exception as exc:
+        logger.warning(
+            "get_topic_embedding_conn: failed to deserialize embedding for topic=%r: %s",
+            topic, exc,
+        )
+        return None
+
+
+def store_topic_embedding_conn(
+    topic: str,
+    embedding: "np.ndarray",
+    conn: sqlite3.Connection,
+) -> None:
+    """Store or replace the HyDE embedding for *topic*."""
+    blob = _serialize_embedding(embedding)
+    today = _date.today().isoformat()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO topic_embeddings (topic, embedding, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (topic, blob, today),
+    )
+    logger.debug("store_topic_embedding_conn: stored embedding for topic=%r", topic)
+
+
+# ---------------------------------------------------------------------------
+# topic_embeddings — public API (db_path-based)
+# ---------------------------------------------------------------------------
+
+def get_topic_embedding(
+    topic: str,
+    db_path: str = DEFAULT_DB_PATH,
+) -> "np.ndarray | None":
+    """Return the stored HyDE embedding for *topic*, or None."""
+    with _open_conn(db_path) as conn:
+        return get_topic_embedding_conn(topic, conn)
+
+
+def store_topic_embedding(
+    topic: str,
+    embedding: "np.ndarray",
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    """Store or replace the HyDE embedding for *topic*."""
+    with _open_conn(db_path) as conn:
+        store_topic_embedding_conn(topic, embedding, conn)

@@ -808,6 +808,26 @@ def plan_queries_fallback(
     return queries
 
 
+def _ensure_topic_embedding(
+    topic: str,
+    llm_client: "PlannerLLMClient",
+    conn: "sqlite3.Connection",
+) -> None:
+    """Generate and store a topic HyDE embedding if not already present."""
+    from redpill.registry import embed_hyde_abstract, generate_hyde_abstract
+    from redpill.state import get_topic_embedding_conn, store_topic_embedding_conn
+
+    try:
+        if get_topic_embedding_conn(topic, conn) is not None:
+            return
+        abstract = generate_hyde_abstract(topic, topic, llm_client)
+        embedding = embed_hyde_abstract(abstract)
+        store_topic_embedding_conn(topic, embedding, conn)
+        logger.debug("_ensure_topic_embedding: stored embedding for topic=%r", topic)
+    except Exception as exc:
+        logger.warning("_ensure_topic_embedding: failed for topic=%r: %s", topic, exc)
+
+
 def plan_queries(
     topic: str,
     conn: "sqlite3.Connection",
@@ -818,6 +838,11 @@ def plan_queries(
     registry_resolution_threshold: float = 0.88,
     hyde_abstracts_per_dim: int = 3,
     scaffold_registry_min_size: int = 5,
+    ucb_alpha: float = 1.0,
+    promotion_k: int = 3,
+    mmr_lambda_floor: float = 0.3,
+    saturation_decay_days: int = 7,
+    saturation_penalty_weight: float = 0.3,
 ) -> list[dict]:
     """Generate search queries using the best available strategy.
 
@@ -911,7 +936,25 @@ def plan_queries(
                     "plan_queries: failed to save research plan: %s", exc
                 )
 
-            # Resolve each dimension against the registry before synthesizing.
+            # Ensure topic HyDE embedding exists for MMR.
+            _ensure_topic_embedding(topic, llm_client, conn)
+
+            # Run pool transitions at start of planning (uses prior run data).
+            from redpill.bandit import (
+                check_promotions,
+                check_retirements,
+                compute_budget_split,
+                mmr_filter,
+                select_exploit_dims,
+                select_explore_dims,
+            )
+            try:
+                check_promotions(conn, topic, k=promotion_k)
+                check_retirements(conn, topic)
+            except Exception as exc:
+                logger.warning("plan_queries: pool transition failed: %s", exc)
+
+            # Resolve each dimension against the registry before bandit selection.
             for dim in plan.get("dimensions", []):
                 name = dim.get("name", "")
                 if not name:
@@ -933,6 +976,51 @@ def plan_queries(
                         exc,
                     )
                     dim["dim_id"] = compute_dim_id(name, topic)
+
+            # Bandit selection: budget split → pool selections → MMR filter.
+            try:
+                n_exploit, n_explore = compute_budget_split(max_queries, conn, topic)
+                exploit_sels = select_exploit_dims(
+                    n_exploit, conn, topic, alpha=ucb_alpha,
+                    saturation_decay_days=saturation_decay_days,
+                    saturation_penalty_weight=saturation_penalty_weight,
+                )
+                explore_sels = select_explore_dims(n_explore, conn, topic)
+
+                for d in exploit_sels:
+                    d = dict(d)
+                for d in explore_sels:
+                    d = dict(d)
+
+                # Build proposed list as dicts with pool tag.
+                proposed: list[dict] = []
+                for d in exploit_sels:
+                    proposed.append({**dict(d), "pool": "exploit"})
+                for d in explore_sels:
+                    proposed.append({**dict(d), "pool": "explore"})
+
+                if proposed:
+                    final_dims = mmr_filter(
+                        proposed, conn, topic, mmr_lambda_floor=mmr_lambda_floor
+                    )
+                    # Restrict plan dimensions to bandit-selected set, preserving order.
+                    selected_ids = [d["dim_id"] for d in final_dims]
+                    dim_id_to_plan_dim = {
+                        d.get("dim_id"): d for d in plan.get("dimensions", [])
+                    }
+                    plan["dimensions"] = [
+                        dim_id_to_plan_dim[did]
+                        for did in selected_ids
+                        if did in dim_id_to_plan_dim
+                    ]
+                    logger.info(
+                        "plan_queries: bandit selected %d dims (exploit=%d explore=%d)",
+                        len(plan["dimensions"]), n_exploit, n_explore,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "plan_queries: bandit selection failed (%s) — using all plan dims", exc
+                )
 
             synth = synthesize_queries(plan, topic, max_queries)
             if synth:
