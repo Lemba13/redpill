@@ -3,7 +3,47 @@ config.py — Load and validate configuration from config.yaml / config.example.
 API keys are loaded from .env via python-dotenv.
 """
 
+import re
+from pathlib import Path
+
 _VALID_SEARCH_PROVIDERS = {"tavily", "serper", "both"}
+
+_DEFAULT_DB_PATH = "data/redpill.db"
+
+
+def _slugify(text: str) -> str:
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s-]+", "_", text)
+    return text
+
+
+def resolve_db_path(config: dict) -> str:
+    """Return the resolved SQLite database path for this config.
+
+    Resolution order (first match wins):
+    1. ``db_path`` key present → use as-is.
+    2. ``db_dir`` key present → construct ``<db_dir>/redpill_<slug>.db``
+       where ``<slug>`` is derived from the ``topic`` key.
+    3. Neither → fall back to ``data/redpill.db``.
+
+    Raises
+    ------
+    ValueError
+        If ``db_dir`` is set but ``topic`` is absent or empty.
+    """
+    if "db_path" in config:
+        return str(config["db_path"])
+
+    if "db_dir" in config:
+        topic: str = config.get("topic", "").strip()
+        if not topic:
+            raise ValueError(
+                "'db_dir' requires 'topic' to be set so the filename can be derived."
+            )
+        return str(Path(config["db_dir"]) / f"redpill_{_slugify(topic)}.db")
+
+    return _DEFAULT_DB_PATH
 
 _FEEDBACK_DEFAULTS: dict = {
     "enabled": False,

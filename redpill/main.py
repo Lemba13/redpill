@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 import yaml
 from dotenv import load_dotenv
 
-from redpill.config import get_feedback_config, get_search_provider
+from redpill.config import get_feedback_config, get_search_provider, resolve_db_path
 from redpill.dedup import compute_embedding, filter_new_items
 from redpill.deliver import DeliveryError, deliver, generate_item_id, write_digest_sidecar
 from redpill.extract import extract_batch
@@ -39,7 +39,6 @@ from redpill.feedback_reader import FeedbackReader
 from redpill.query_planner import plan_queries, plan_queries_fallback
 from redpill.search import search
 from redpill.state import (
-    DEFAULT_DB_PATH,
     add_item,
     get_query_performance,
     get_recent_terms,
@@ -187,7 +186,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     static_queries: list[str] = config.get("search_queries", [])
     max_results: int = int(config.get("max_results_per_query", 10))
     threshold: float = float(config.get("dedup_similarity_threshold", 0.85))
-    db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+    db_path: str = resolve_db_path(config)
 
     qp_cfg: dict = config.get("query_planning", {})
     use_planner: bool = bool(qp_cfg.get("enabled", False))
@@ -744,7 +743,7 @@ def _cmd_plan(args: argparse.Namespace) -> None:
         print("ERROR: 'topic' is required in config.", file=sys.stderr)
         sys.exit(1)
 
-    db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+    db_path: str = resolve_db_path(config)
     qp_cfg: dict = config.get("query_planning", {})
     max_queries: int = args.max_queries or int(qp_cfg.get("max_queries", 5))
     ucb_alpha: float = float(qp_cfg.get("ucb_alpha", 1.0))
@@ -835,7 +834,7 @@ def _cmd_plan(args: argparse.Namespace) -> None:
 def _cmd_stats(args: argparse.Namespace) -> None:
     """Handler for: redpill stats [--config PATH]."""
     config = _load_config(args.config)
-    db_path = config.get("db_path", DEFAULT_DB_PATH)
+    db_path = resolve_db_path(config)
 
     if not Path(db_path).exists():
         print(f"No database found at {db_path}. Run 'redpill run' first.")
@@ -891,7 +890,7 @@ def _cmd_stats(args: argparse.Namespace) -> None:
 def _cmd_queries(args: argparse.Namespace) -> None:
     """Handler for: redpill queries [--config PATH] [--last N]."""
     config = _load_config(args.config)
-    db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+    db_path: str = resolve_db_path(config)
     topic: str = config.get("topic", "")
 
     if not topic:
@@ -922,7 +921,7 @@ def _cmd_queries(args: argparse.Namespace) -> None:
 def _cmd_terms(args: argparse.Namespace) -> None:
     """Handler for: redpill terms [--config PATH] [--top N | --recent [DAYS]]."""
     config = _load_config(args.config)
-    db_path: str = config.get("db_path", DEFAULT_DB_PATH)
+    db_path: str = resolve_db_path(config)
     topic: str = config.get("topic", "")
 
     if not topic:

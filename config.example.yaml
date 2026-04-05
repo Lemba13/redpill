@@ -18,7 +18,12 @@ search_provider: "both"
 
 dedup_similarity_threshold: 0.85
 
+# Option A: explicit path (default)
 db_path: "data/redpill.db"
+
+# Option B: directory only — file is named redpill_<topic_slug>.db automatically.
+# Useful when running multiple topics. If both are set, db_path wins.
+# db_dir: "data"
 
 # "markdown" writes to data/digests/YYYY-MM-DD.md
 # "email"    sends via SMTP (requires email_config below)
