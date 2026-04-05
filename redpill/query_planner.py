@@ -42,13 +42,13 @@ Each returned query dict has:
     reasoning — human-readable explanation of why this query was chosen
 """
 
-import hashlib
 import json
 import logging
 from datetime import date as _date
 from typing import TYPE_CHECKING
 
 from redpill.llm_utils import extract_json
+from redpill.registry import compute_dim_id, get_all_registry_dims_for_prompt
 from redpill.state import (
     get_query_performance_conn,
     get_recent_terms_conn,
@@ -81,17 +81,6 @@ _MAX_TERMS_IN_PROMPT = 20
 
 # How many days of query performance history to include in the planner prompt.
 _QUERY_PERF_HISTORY_DAYS = 14
-
-
-def _compute_dim_id(canonical_name: str, topic: str) -> str:
-    """Return a stable dim_id for a named dimension within a topic.
-
-    Format: "dim_" + first 12 hex chars of SHA-256(canonical_name + topic).
-    Deterministic across runs — two runs with the same dimension name and topic
-    produce the same dim_id, allowing reward history to accumulate.
-    """
-    raw = (canonical_name + topic).encode("utf-8")
-    return "dim_" + hashlib.sha256(raw).hexdigest()[:12]
 
 
 def _base_query(topic: str) -> dict:
@@ -209,6 +198,10 @@ def _build_decompose_prompt(
     max_dimensions: int,
     feedback_signals: dict | None = None,
     min_votes_for_signals: int = 5,
+    registry_dims: list[dict] | None = None,
+    scaffold: dict | None = None,
+    registry_size: int = 0,
+    scaffold_registry_min_size: int = 5,
 ) -> str:
     """Build the two-stage decomposition prompt for the reasoning LLM.
 
@@ -224,6 +217,18 @@ def _build_decompose_prompt(
         appended to the prompt.
     min_votes_for_signals:
         Minimum total votes before feedback signals are included.
+    registry_dims:
+        All registered dimensions for this topic with axis annotations.
+        Used to build the coverage map section.
+    scaffold:
+        Topic coverage scaffold from generate_topic_scaffold(). Used to
+        list known families when the registry is still sparse.
+    registry_size:
+        Number of non-system rows in dimension_registry. Controls whether
+        to show the scaffold (sparse) or the full coverage map (populated).
+    scaffold_registry_min_size:
+        Registry must have at least this many entries before the full
+        coverage map replaces the scaffold in the prompt.
     """
     # Format previous plan
     if previous_plan:
@@ -262,24 +267,101 @@ def _build_decompose_prompt(
     else:
         query_perf_text = "  (no query history yet)"
 
-    base_prompt = f"""\
-You are a research strategist planning the next search run for a daily research digest.
+    # ------------------------------------------------------------------
+    # Section 1 — Intent framing (prepended before everything)
+    # ------------------------------------------------------------------
+    intent_framing = (
+        "Your goal is to generate research dimensions that MAXIMIZE COVERAGE of the\n"
+        'topic "' + topic + '", not to deepen what is already well-covered.\n\n'
+        "A research dimension defines a specific angle, community, or application area\n"
+        "to search for new content. The system has a known failure mode: it repeatedly\n"
+        "generates dimensions that are semantically similar to what it has already\n"
+        "explored, creating an echo chamber where the same research communities are\n"
+        "surfaced repeatedly.\n\n"
+        "Your job is to identify what is MISSING from the current coverage and generate\n"
+        "dimensions in those gaps.\n\n"
+    )
 
-Topic: {topic}
-Today's date: {today}
+    # ------------------------------------------------------------------
+    # Section 2 — Coverage map or scaffold (after intent, before body)
+    # ------------------------------------------------------------------
+    if registry_size < scaffold_registry_min_size:
+        # Registry is still sparse — show the scaffold families instead.
+        if scaffold:
+            scaffold_lines: list[str] = [
+                "## Topic coverage scaffold (registry is still sparse)\n",
+                "The following major families exist within this topic. Ensure your\n"
+                "dimensions span multiple families rather than clustering in one area:\n",
+            ]
+            for axis, entries in scaffold.items():
+                if entries:
+                    scaffold_lines.append(f"  {axis}:")
+                    for entry in entries[:6]:
+                        scaffold_lines.append(f"    - {entry}")
+            coverage_section = "\n".join(scaffold_lines) + "\n\n"
+        else:
+            coverage_section = ""
+    else:
+        # Registry is populated — show the full annotated coverage map.
+        if registry_dims:
+            dim_lines: list[str] = []
+            for d in registry_dims:
+                tags_str = ", ".join(d.get("tags", [])[:3]) or "—"
+                dim_lines.append(
+                    f'  - "{d["canonical_name"]}" '
+                    f'[axis: {d["primary_axis"]}] '
+                    f'[coverage: {d["coverage"]}] '
+                    f'[terms: {tags_str}]'
+                )
 
-Previous research plan (from last run):
-{prev_plan_text}
+            # Summarise which axes are well-covered vs sparse.
+            axis_counts: dict[str, int] = {}
+            for d in registry_dims:
+                ax = d.get("primary_axis", "unknown")
+                axis_counts[ax] = axis_counts.get(ax, 0) + 1
+            well_covered_axes = [ax for ax, cnt in axis_counts.items() if cnt >= 2]
 
-Domain terms extracted from recent articles (last 14 days):
-{recent_terms_text}
+            sparse_axes: list[str] = []
+            if scaffold:
+                for ax in scaffold:
+                    if axis_counts.get(ax, 0) < 2:
+                        sparse_axes.append(ax)
 
-All-time top terms (by frequency):
-  {top_terms_text}
+            coverage_section = (
+                "## Current coverage map\n\n"
+                "The following dimensions have already been explored. Do NOT generate\n"
+                "dimensions that are semantically similar to these.\n\n"
+                + "\n".join(dim_lines) + "\n\n"
+            )
+            if well_covered_axes:
+                coverage_section += (
+                    "Coverage summary:\n"
+                    "  Well-covered axes: " + ", ".join(well_covered_axes) + "\n"
+                )
+            if sparse_axes:
+                coverage_section += (
+                    "  Sparse or absent axes: " + ", ".join(sparse_axes) + "\n"
+                )
+            coverage_section += "\n"
+        else:
+            coverage_section = ""
 
-Query performance from recent runs:
-{query_perf_text}
-"""
+    # ------------------------------------------------------------------
+    # Body — existing context sections
+    # ------------------------------------------------------------------
+    body = (
+        "You are a research strategist planning the next search run for a daily research digest.\n\n"
+        "Topic: " + topic + "\n"
+        "Today's date: " + today + "\n\n"
+        "Previous research plan (from last run):\n"
+        + prev_plan_text + "\n\n"
+        "Domain terms extracted from recent articles (last 14 days):\n"
+        + recent_terms_text + "\n\n"
+        "All-time top terms (by frequency):\n"
+        "  " + top_terms_text + "\n\n"
+        "Query performance from recent runs:\n"
+        + query_perf_text + "\n"
+    )
 
     # Append feedback signals when available and meaningful.
     if (
@@ -287,41 +369,62 @@ Query performance from recent runs:
         and feedback_signals.get("has_feedback")
         and feedback_signals.get("vote_count", 0) >= min_votes_for_signals
     ):
-        base_prompt += _format_feedback_section(feedback_signals)
+        body += _format_feedback_section(feedback_signals)
     else:
-        base_prompt += (
+        body += (
             "\nNo user feedback available yet. "
             "Base priorities on topic analysis and query performance only.\n"
         )
 
-    base_prompt += f"""
-Your task: Produce an updated research plan with {max_dimensions} dimensions \
-(subtopics/angles) to investigate.
+    # ------------------------------------------------------------------
+    # Section 3 — Gap analysis instruction (before the task)
+    # ------------------------------------------------------------------
+    gap_analysis = (
+        "\n## Your task: gap analysis first, then generate\n\n"
+        "Before proposing any dimensions, reason through the following questions:\n"
+        "1. Which methodological families from the scaffold are absent or sparse in\n"
+        "   the current coverage map?\n"
+        "2. Which application domains or research communities are unrepresented?\n"
+        "3. Which evaluation paradigms or theoretical angles have not been explored?\n"
+        "4. What adjacent fields apply similar techniques to different problems?\n\n"
+        "Write your gap analysis in your thinking. Only then propose dimensions.\n\n"
+    )
 
-For each dimension:
-- "name": short label (3-6 words)
-- "description": one sentence explaining what this covers
-- "priority": "high" | "medium" | "low" — based on how much new content is likely to exist
-- "coverage": "under-explored" | "partially-covered" | "well-covered" — based on what prior runs have already found
-- "suggested_queries": list of 1-2 realistic web search strings (3-8 words each, the kind you'd type into Google)
+    # ------------------------------------------------------------------
+    # Section 4 — Task + constrained generation
+    # ------------------------------------------------------------------
+    min_axes = min(3, max_dimensions)
+    task = (
+        f"Your task: Produce an updated research plan with {max_dimensions} dimensions "
+        "(subtopics/angles) to investigate.\n\n"
+        "For each dimension:\n"
+        '- "name": short label (3-6 words)\n'
+        '- "description": one sentence explaining what this covers\n'
+        '- "priority": "high" | "medium" | "low" — based on how much new content is likely to exist\n'
+        '- "coverage": "under-explored" | "partially-covered" | "well-covered" — based on what prior runs have already found\n'
+        '- "type": "orthogonal" | "adjacent" — orthogonal means an axis absent from the coverage map; adjacent means a new angle on an existing axis\n'
+        '- "suggested_queries": list of 1-2 realistic web search strings (3-8 words each, the kind you\'d type into Google)\n\n'
+        "Also include:\n"
+        '- "dropped_dimensions": list of areas from the previous plan you are removing, each with a "name" and "reason"\n'
+        '- "new_directions": list of strings — any emerging angles suggested by recent findings not in the previous plan\n\n'
+        "Rules:\n"
+        "- Always keep one dimension for the base topic itself (broad catch-all)\n"
+        "- Always keep at least one \"exploratory\" dimension probing an adjacent area\n"
+        "- Deprioritize dimensions where recent queries found zero new content\n"
+        "- Prioritize dimensions where extracted terms are trending (appearing with increasing frequency)\n"
+        "- Search queries should be realistic web search strings, not academic jargon dumps\n"
+        '- Good query: "contrastive learning hard negatives 2026" — specific, likely to find content\n'
+        '- Bad query: "contrastive self-supervised representation learning methodologies" — too dense\n\n'
+        "Additional constraints — ALL must be satisfied:\n"
+        "1. Each dimension must be semantically distinct from every dimension in the coverage map above\n"
+        f"2. At least 1 dimension must be ORTHOGONAL — covering an axis entirely absent from the coverage map\n"
+        "3. At most 2 dimensions may be ADJACENT — a new angle on an existing axis\n"
+        f"4. Dimensions must span at least {min_axes} distinct research axes\n\n"
+        "Respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON.\n"
+        'The top-level JSON object must have exactly these keys: "dimensions", "dropped_dimensions", "new_directions".\n'
+    )
 
-Also include:
-- "dropped_dimensions": list of areas from the previous plan you are removing, each with a "name" and "reason"
-- "new_directions": list of strings — any emerging angles suggested by recent findings not in the previous plan
-
-Rules:
-- Always keep one dimension for the base topic itself (broad catch-all)
-- Always keep at least one "exploratory" dimension probing an adjacent area
-- Deprioritize dimensions where recent queries found zero new content
-- Prioritize dimensions where extracted terms are trending (appearing with increasing frequency)
-- Search queries should be realistic web search strings, not academic jargon dumps
-- Good query: "contrastive learning hard negatives 2026" — specific, likely to find content
-- Bad query: "contrastive self-supervised representation learning methodologies" — too dense
-
-Respond with valid JSON only. No preamble, no markdown, no explanation outside the JSON.
-The top-level JSON object must have exactly these keys: "dimensions", "dropped_dimensions", "new_directions".
-"""
-    return base_prompt
+    return intent_framing + coverage_section + body + gap_analysis + task
 
 
 def _parse_llm_queries(raw: str, topic: str, n_expected: int) -> list[dict]:
@@ -411,12 +514,14 @@ def decompose_topic(
     max_dimensions: int = 6,
     feedback_signals: "dict | None" = None,
     min_votes_for_signals: int = 5,
+    scaffold_registry_min_size: int = 5,
 ) -> dict:
     """Stage 1: use the reasoning LLM to produce a structured research plan.
 
     Gathers all available context from the DB (previous plan, recent terms,
-    top terms, query performance) and feeds it to the reasoning model. The
-    model produces a plan with dimensions, priorities, and coverage assessments.
+    top terms, query performance, registry coverage map, topic scaffold) and
+    feeds it to the reasoning model. The model produces a plan with dimensions,
+    priorities, coverage assessments, and orthogonal/adjacent type labels.
 
     Parameters
     ----------
@@ -434,6 +539,9 @@ def decompose_topic(
         preference signals are included in the planning prompt.
     min_votes_for_signals:
         Minimum vote count before feedback signals are included.
+    scaffold_registry_min_size:
+        Registry must have at least this many entries before showing the
+        full coverage map instead of the scaffold.
 
     Returns
     -------
@@ -445,6 +553,9 @@ def decompose_topic(
         If the LLM call fails or returns an unparseable/invalid plan.
         Callers should catch this and fall back to plan_queries_fallback().
     """
+    from redpill.registry import generate_topic_scaffold, get_registry_size
+    from redpill.state import get_latest_research_plan_conn
+
     today = _date.today().isoformat()
 
     # Gather context from DB.
@@ -453,7 +564,6 @@ def decompose_topic(
     query_perf = get_query_performance_conn(topic, _QUERY_PERF_HISTORY_DAYS, conn)
 
     # Load previous plan if available.
-    from redpill.state import get_latest_research_plan_conn
     prev_plan_row = get_latest_research_plan_conn(topic, conn)
     previous_plan: dict | None = None
     if prev_plan_row:
@@ -461,6 +571,19 @@ def decompose_topic(
             previous_plan = json.loads(prev_plan_row["plan_json"])
         except (json.JSONDecodeError, KeyError) as exc:
             logger.warning("decompose_topic: could not load previous plan: %s", exc)
+
+    # Gather registry context for the coverage map / scaffold sections.
+    registry_size = get_registry_size(conn)
+    registry_dims = get_all_registry_dims_for_prompt(topic, conn)
+
+    scaffold: dict | None = None
+    try:
+        scaffold = generate_topic_scaffold(topic, planner_llm, conn)
+    except Exception as exc:
+        logger.warning(
+            "decompose_topic: scaffold generation failed (%s) — proceeding without it",
+            exc,
+        )
 
     prompt = _build_decompose_prompt(
         topic=topic,
@@ -472,12 +595,19 @@ def decompose_topic(
         max_dimensions=max_dimensions,
         feedback_signals=feedback_signals,
         min_votes_for_signals=min_votes_for_signals,
+        registry_dims=registry_dims,
+        scaffold=scaffold,
+        registry_size=registry_size,
+        scaffold_registry_min_size=scaffold_registry_min_size,
     )
 
     logger.info(
-        "decompose_topic: calling reasoning LLM (model=%r) for topic %r ...",
+        "decompose_topic: calling reasoning LLM (model=%r) for topic %r "
+        "(registry_size=%d, scaffold=%s) ...",
         getattr(planner_llm, "_model", "unknown"),
         topic,
+        registry_size,
+        "yes" if scaffold else "no",
     )
 
     raw = planner_llm.generate(prompt, system=_DECOMPOSE_SYSTEM_PROMPT)
@@ -584,7 +714,7 @@ def synthesize_queries(
         suggested = dim.get("suggested_queries", [])
         if not isinstance(suggested, list):
             continue
-        d_id = _compute_dim_id(name, topic)
+        d_id = dim.get("dim_id") or compute_dim_id(name, topic)
         for sq in suggested:
             if not isinstance(sq, str):
                 continue
@@ -685,6 +815,9 @@ def plan_queries(
     max_queries: int = 5,
     feedback_signals: "dict | None" = None,
     min_votes_for_signals: int = 5,
+    registry_resolution_threshold: float = 0.88,
+    hyde_abstracts_per_dim: int = 3,
+    scaffold_registry_min_size: int = 5,
 ) -> list[dict]:
     """Generate search queries using the best available strategy.
 
@@ -692,8 +825,8 @@ def plan_queries(
 
     1. Two-stage path (PlannerLLMClient):
        If *llm_client* is a PlannerLLMClient, call decompose_topic() to get a
-       structured research plan, save it to DB, then synthesize_queries() to
-       extract query strings.  The reasoning trace is saved alongside the plan.
+       structured research plan, save it to DB, resolve each dimension against
+       the registry, then synthesize_queries() to extract query strings.
 
     2. Single-stage path (standard LLMClient):
        If term history exists, ask the LLM for a JSON array of query strings
@@ -721,19 +854,27 @@ def plan_queries(
         Passed through to decompose_topic() for the two-stage path only.
     min_votes_for_signals:
         Minimum vote count before feedback signals affect the planning prompt.
+    registry_resolution_threshold:
+        Cosine similarity threshold for merging a new candidate into an
+        existing registry dimension (default 0.88).
+    hyde_abstracts_per_dim:
+        Number of HyDE abstracts to generate when registering a new dimension.
+    scaffold_registry_min_size:
+        Registry must have at least this many entries before the full
+        coverage map is shown instead of the scaffold.
 
     Returns
     -------
-    A list of query dicts, each with keys: query, source, reasoning.
+    A list of query dicts, each with keys: query, source, reasoning, dim_id.
     The first element is always the base topic query.
     """
+    from redpill.registry import resolve_or_register
     from redpill.summarize import PlannerLLMClient as _PlannerLLMClient
 
     if max_queries <= 1:
         return [_base_query(topic)]
 
     today = _date.today().isoformat()
-
 
     # ------------------------------------------------------------------
     # Path 1: Two-stage decomposition (PlannerLLMClient with think=True)
@@ -746,6 +887,7 @@ def plan_queries(
                 llm_client,
                 feedback_signals=feedback_signals,
                 min_votes_for_signals=min_votes_for_signals,
+                scaffold_registry_min_size=scaffold_registry_min_size,
             )
         except Exception as exc:
             logger.warning(
@@ -768,6 +910,29 @@ def plan_queries(
                 logger.warning(
                     "plan_queries: failed to save research plan: %s", exc
                 )
+
+            # Resolve each dimension against the registry before synthesizing.
+            for dim in plan.get("dimensions", []):
+                name = dim.get("name", "")
+                if not name:
+                    dim["dim_id"] = "dim_fallback"
+                    continue
+                try:
+                    dim["dim_id"] = resolve_or_register(
+                        name,
+                        topic,
+                        llm_client,
+                        conn,
+                        threshold=registry_resolution_threshold,
+                        n_abstracts=hyde_abstracts_per_dim,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "plan_queries: resolve_or_register failed for %r: %s — using hash",
+                        name,
+                        exc,
+                    )
+                    dim["dim_id"] = compute_dim_id(name, topic)
 
             synth = synthesize_queries(plan, topic, max_queries)
             if synth:

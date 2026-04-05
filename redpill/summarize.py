@@ -219,7 +219,13 @@ class PlannerLLMClient:
         self._client = ollama.Client(host=base_url, timeout=timeout)
         self.last_thinking: str | None = None
 
-    def generate(self, prompt: str, system: str | None = None) -> str:
+    def generate(
+        self,
+        prompt: str,
+        system: str | None = None,
+        think_override: bool | None = None,
+        json_format: bool = True,
+    ) -> str:
         """Call the reasoning model and return the final answer content.
 
         When think=True, the model produces a <think>...</think> block before
@@ -230,11 +236,22 @@ class PlannerLLMClient:
 
         The reasoning trace is stored in ``self.last_thinking`` after each call.
 
+        Parameters
+        ----------
+        think_override:
+            When provided, overrides the instance-level ``think`` setting for
+            this call only. Pass ``False`` for free-text generation (e.g. HyDE
+            abstracts) where thinking overhead is wasteful.
+        json_format:
+            When False, omits ``format="json"`` from the Ollama call. Use for
+            free-text responses such as HyDE abstracts.
+
         Raises RuntimeError on any connection, timeout, or Ollama API failure.
         """
         from redpill.llm_utils import strip_think_blocks
 
         self.last_thinking = None
+        effective_think = think_override if think_override is not None else self._think
 
         messages: list[dict] = []
         if system is not None:
@@ -242,9 +259,10 @@ class PlannerLLMClient:
         messages.append({"role": "user", "content": prompt})
 
         logger.debug(
-            "PlannerLLMClient.generate: model=%r think=%s prompt_len=%d",
+            "PlannerLLMClient.generate: model=%r think=%s json_format=%s prompt_len=%d",
             self._model,
-            self._think,
+            effective_think,
+            json_format,
             len(prompt),
         )
 
@@ -252,10 +270,11 @@ class PlannerLLMClient:
             kwargs: dict = {
                 "model": self._model,
                 "messages": messages,
-                "format": "json",
                 "options": {"num_ctx": self._num_ctx},
             }
-            if self._think:
+            if json_format:
+                kwargs["format"] = "json"
+            if effective_think:
                 kwargs["think"] = True
 
             response: ollama.ChatResponse = self._client.chat(**kwargs)
@@ -281,7 +300,7 @@ class PlannerLLMClient:
         thinking: str | None = getattr(response.message, "thinking", None)
         if thinking:
             self.last_thinking = thinking
-        elif self._think and "<think>" in content:
+        elif effective_think and "<think>" in content:
             import re as _re
             m = _re.search(r"<think>(.*?)</think>", content, _re.DOTALL)
             if m:
