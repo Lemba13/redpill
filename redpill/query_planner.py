@@ -612,6 +612,23 @@ def decompose_topic(
 
     raw = planner_llm.generate(prompt, system=_DECOMPOSE_SYSTEM_PROMPT)
 
+    # Persist raw response and thinking trace before parsing — we want the log
+    # even if parsing fails.
+    from redpill.state import log_llm_call_conn
+    try:
+        log_llm_call_conn(
+            call_site="decompose_topic",
+            raw_response=raw,
+            conn=conn,
+            model=getattr(planner_llm, "_model", None),
+            topic=topic,
+            prompt_len=len(prompt),
+            thinking=getattr(planner_llm, "last_thinking", None),
+            run_date=today,
+        )
+    except Exception as _exc:
+        logger.warning("decompose_topic: failed to log LLM call: %s", _exc)
+
     plan = _parse_research_plan(raw)
     if plan is None:
         raise RuntimeError(

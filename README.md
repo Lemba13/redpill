@@ -2,6 +2,8 @@
 
 An autonomous agent that crawls the web daily for a given topic, deduplicates against previously seen content, summarizes new findings with a local LLM, and delivers a clean digest. Each run extracts domain-specific terms and uses them to plan smarter queries for the next run. A lightweight feedback service lets you vote on digest items, and those signals feed back into the planner to prioritize what you actually find useful.
 
+![Architecture](docs/architecture.png)
+
 ## How it works
 
 1. **Plan** — Uses term history and user feedback signals from prior runs to generate targeted search queries via LLM (or falls back to deterministic term expansion). The base topic is always included.

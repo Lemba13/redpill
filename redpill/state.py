@@ -44,6 +44,22 @@ research_plans:
     reasoning_trace TEXT               -- reasoning model's chain of thought (if available)
     source          TEXT NOT NULL DEFAULT 'llm'  -- "llm" or "fallback"
 
+topic_scaffold:
+    topic                    TEXT PRIMARY KEY
+    scaffold                 TEXT NOT NULL
+    created_at               DATE NOT NULL
+    scaffold_reasoning_trace TEXT   -- reasoning trace from PlannerLLMClient, if available
+
+llm_call_log:
+    id           INTEGER PRIMARY KEY AUTOINCREMENT
+    run_date     DATE    NOT NULL
+    call_site    TEXT    NOT NULL   -- e.g. "summarize_item", "decompose_topic"
+    model        TEXT               -- Ollama model name
+    topic        TEXT               -- research topic
+    prompt_len   INTEGER            -- character length of the prompt
+    raw_response TEXT               -- unmodified LLM response string
+    thinking     TEXT               -- reasoning trace, when available
+
 Embedding serialization format (all fields packed via struct.pack):
     [4 bytes: dtype_len (uint32 big-endian)]
     [dtype_len bytes: dtype string, e.g. b"float32"]
@@ -65,6 +81,7 @@ Public API:
     get_query_performance(topic: str, db_path: str, days: int = 14) -> list[dict]
     save_research_plan(topic: str, run_date: str, plan: dict, db_path: str, reasoning_trace: str | None, source: str) -> int
     get_latest_research_plan(topic: str, db_path: str) -> dict | None
+    log_llm_call(call_site: str, raw_response: str, db_path: str, *, model, topic, prompt_len, thinking, run_date) -> int
 
 Internal (for testing with an in-memory connection):
     init_db_conn(conn) -> None
@@ -80,6 +97,7 @@ Internal (for testing with an in-memory connection):
     get_query_performance_conn(topic, days, conn) -> list[dict]
     save_research_plan_conn(topic, run_date, plan, conn, reasoning_trace, source) -> int
     get_latest_research_plan_conn(topic, conn) -> dict | None
+    log_llm_call_conn(call_site, raw_response, conn, *, model, topic, prompt_len, thinking, run_date) -> int
 """
 
 import logging
@@ -167,9 +185,10 @@ CREATE TABLE IF NOT EXISTS research_plans (
 
 _CREATE_TOPIC_SCAFFOLD_SQL = """
 CREATE TABLE IF NOT EXISTS topic_scaffold (
-    topic       TEXT PRIMARY KEY,
-    scaffold    TEXT NOT NULL,
-    created_at  DATE NOT NULL
+    topic                    TEXT PRIMARY KEY,
+    scaffold                 TEXT NOT NULL,
+    created_at               DATE NOT NULL,
+    scaffold_reasoning_trace TEXT
 )
 """
 
@@ -178,6 +197,19 @@ CREATE TABLE IF NOT EXISTS topic_embeddings (
     topic       TEXT PRIMARY KEY,
     embedding   BLOB NOT NULL,
     created_at  DATE NOT NULL
+)
+"""
+
+_CREATE_LLM_CALL_LOG_SQL = """
+CREATE TABLE IF NOT EXISTS llm_call_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date     DATE    NOT NULL,
+    call_site    TEXT    NOT NULL,
+    model        TEXT,
+    topic        TEXT,
+    prompt_len   INTEGER,
+    raw_response TEXT,
+    thinking     TEXT
 )
 """
 
@@ -292,12 +324,14 @@ def init_db_conn(conn: sqlite3.Connection) -> None:
     conn.execute(_CREATE_DIMENSION_REGISTRY_SQL)
     conn.execute(_CREATE_TOPIC_SCAFFOLD_SQL)
     conn.execute(_CREATE_TOPIC_EMBEDDINGS_SQL)
+    conn.execute(_CREATE_LLM_CALL_LOG_SQL)
 
     # Safe migrations for existing databases — silently skip if column exists.
     for _stmt in (
         "ALTER TABLE query_log ADD COLUMN dim_id TEXT",
         "ALTER TABLE seen_items ADD COLUMN dim_id TEXT",
         "ALTER TABLE query_log ADD COLUMN avg_relevance_score REAL",
+        "ALTER TABLE topic_scaffold ADD COLUMN scaffold_reasoning_trace TEXT",
     ):
         try:
             conn.execute(_stmt)
@@ -860,6 +894,95 @@ def get_latest_research_plan(
     """
     with _open_conn(db_path) as conn:
         return get_latest_research_plan_conn(topic, conn)
+
+
+# ---------------------------------------------------------------------------
+# llm_call_log — internal implementations
+# ---------------------------------------------------------------------------
+
+def log_llm_call_conn(
+    call_site: str,
+    raw_response: str,
+    conn: "sqlite3.Connection",
+    model: str | None = None,
+    topic: str | None = None,
+    prompt_len: int | None = None,
+    thinking: str | None = None,
+    run_date: str | None = None,
+) -> int:
+    """Insert one row into llm_call_log and return its id.
+
+    Parameters
+    ----------
+    call_site:
+        Human-readable label for the call origin, e.g. "summarize_item",
+        "extract_terms", "decompose_topic", "generate_hyde_abstract",
+        "generate_topic_scaffold".
+    raw_response:
+        The unmodified string returned by the LLM before any post-processing.
+    conn:
+        An open SQLite connection.
+    model:
+        Name of the model that produced the response (optional).
+    topic:
+        The research topic in context, for filtering in the UI (optional).
+    prompt_len:
+        Character length of the prompt sent to the LLM (optional).
+    thinking:
+        The reasoning / chain-of-thought trace extracted from the response,
+        when the model emits one (optional).
+    run_date:
+        ISO date string; defaults to today.
+    """
+    if run_date is None:
+        run_date = _date.today().isoformat()
+
+    cursor = conn.execute(
+        """
+        INSERT INTO llm_call_log
+            (run_date, call_site, model, topic, prompt_len, raw_response, thinking)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_date, call_site, model, topic, prompt_len, raw_response, thinking),
+    )
+    row_id: int = cursor.lastrowid  # type: ignore[assignment]
+    logger.debug(
+        "log_llm_call_conn: call_site=%r model=%r topic=%r id=%d",
+        call_site, model, topic, row_id,
+    )
+    return row_id
+
+
+def log_llm_call(
+    call_site: str,
+    raw_response: str,
+    db_path: str = DEFAULT_DB_PATH,
+    model: str | None = None,
+    topic: str | None = None,
+    prompt_len: int | None = None,
+    thinking: str | None = None,
+    run_date: str | None = None,
+) -> int:
+    """Insert one row into llm_call_log and return its id.
+
+    Opens and closes its own connection.  Errors are logged as warnings and
+    swallowed — LLM output logging must never abort the pipeline.
+    """
+    try:
+        with _open_conn(db_path) as conn:
+            return log_llm_call_conn(
+                call_site=call_site,
+                raw_response=raw_response,
+                conn=conn,
+                model=model,
+                topic=topic,
+                prompt_len=prompt_len,
+                thinking=thinking,
+                run_date=run_date,
+            )
+    except Exception as exc:
+        logger.warning("log_llm_call: failed to write call log (%s) — continuing", exc)
+        return -1
 
 
 # ---------------------------------------------------------------------------

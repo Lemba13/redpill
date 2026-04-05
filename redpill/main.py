@@ -445,7 +445,12 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     summarized: list[dict] = []
     for item in new_items:
         try:
-            result = summarize_item(item, topic=topic, client=llm_client)
+            result = summarize_item(
+                item,
+                topic=topic,
+                client=llm_client,
+                db_path=db_path if not dry_run else None,
+            )
             # summarize_item always returns; it uses a fallback on LLM errors.
             # Attach the original item fields we still need for state persistence
             # and sidecar annotation.
@@ -494,7 +499,9 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
 
         logger.info("Running term extraction on %d summarized item(s) ...", len(items_for_extraction))
         try:
-            extracted_terms = extract_terms_batch(items_for_extraction, topic, llm_client)
+            extracted_terms = extract_terms_batch(
+                items_for_extraction, topic, llm_client, db_path=db_path
+            )
         except Exception as exc:
             logger.warning("Term extraction failed: %s — continuing without terms", exc)
             extracted_terms = []

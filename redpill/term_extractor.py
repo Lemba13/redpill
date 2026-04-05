@@ -88,6 +88,7 @@ def extract_terms(
     item: dict,
     topic: str,
     llm_client: "LLMClient",
+    db_path: str | None = None,
 ) -> list[dict]:
     """Extract domain-specific terms from a single summarized item.
 
@@ -100,6 +101,9 @@ def extract_terms(
         The research topic — used to judge term relevance in the prompt.
     llm_client:
         Any object satisfying the LLMClient Protocol.
+    db_path:
+        When provided, the raw LLM response is written to llm_call_log in
+        this database.  Pass None to skip logging (default).
 
     Returns
     -------
@@ -120,6 +124,19 @@ def extract_terms(
     except Exception as exc:
         logger.warning("extract_terms: LLM call failed for url=%r: %s", url, exc)
         return []
+
+    # Persist raw response for debugging / analysis.
+    if db_path is not None:
+        from redpill.state import log_llm_call
+        log_llm_call(
+            call_site="extract_terms",
+            raw_response=getattr(llm_client, "last_raw_response", None) or raw,
+            db_path=db_path,
+            model=getattr(llm_client, "_model", None),
+            topic=topic,
+            prompt_len=len(prompt),
+            thinking=getattr(llm_client, "last_thinking", None),
+        )
 
     parsed = extract_json(raw)
 
@@ -171,6 +188,7 @@ def extract_terms_batch(
     items: list[dict],
     topic: str,
     llm_client: "LLMClient",
+    db_path: str | None = None,
 ) -> list[dict]:
     """Extract terms from a batch of summarized items.
 
@@ -186,6 +204,9 @@ def extract_terms_batch(
         Research topic passed through to extract_terms.
     llm_client:
         Any LLMClient-compatible object.
+    db_path:
+        When provided, each raw LLM response is logged to llm_call_log.
+        Passed through to extract_terms.  Pass None to skip logging (default).
 
     Returns
     -------
@@ -216,7 +237,7 @@ def extract_terms_batch(
             )
             continue
 
-        terms = extract_terms(item, topic, llm_client)
+        terms = extract_terms(item, topic, llm_client, db_path=db_path)
         all_terms.extend(terms)
 
     logger.info(
