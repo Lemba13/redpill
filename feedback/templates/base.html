@@ -9,15 +9,16 @@
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         :root {
-            --bg: #ffffff;
-            --bg-card: #f8f9fa;
-            --bg-hover: #f0f1f3;
-            --text-primary: #1a1a1a;
-            --text-secondary: #5a5a5a;
-            --text-muted: #8a8a8a;
-            --border: #e2e4e8;
-            --accent: #4f46e5;
-            --accent-light: #eef2ff;
+            --bg: #f5f4ed;
+            --bg-card: #faf9f5;
+            --bg-hover: #e8e6dc;
+            --text-primary: #141413;
+            --text-secondary: #5e5d59;
+            --text-muted: #87867f;
+            --border: #f0eee6;
+            --accent: #c96442;
+            --accent-light: #fdf0eb;
+            --focus: #3898ec;
             --green: #16a34a;
             --green-light: #f0fdf4;
             --green-border: #bbf7d0;
@@ -25,31 +26,31 @@
             --red-light: #fef2f2;
             --red-border: #fecaca;
             --radius: 8px;
-            --radius-lg: 12px;
+            --radius-lg: 8px;
             --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
-                --bg: #0f0f0f;
-                --bg-card: #1a1a1a;
-                --bg-hover: #252525;
-                --text-primary: #e5e5e5;
-                --text-secondary: #a0a0a0;
-                --text-muted: #666666;
-                --border: #2a2a2a;
-                --accent: #818cf8;
-                --accent-light: #1e1b4b;
+                --bg: #141413;
+                --bg-card: #1c1c1a;
+                --bg-hover: #2a2a27;
+                --text-primary: #e8e6dc;
+                --text-secondary: #b0aea5;
+                --text-muted: #87867f;
+                --border: #30302e;
+                --accent: #d97757;
+                --accent-light: #2a1a12;
                 --green-light: #052e16;
                 --green-border: #14532d;
                 --red-light: #450a0a;
                 --red-border: #7f1d1d;
-                --shadow: 0 1px 3px rgba(0,0,0,0.3);
+                --shadow: 0 1px 3px rgba(0,0,0,0.4);
             }
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: system-ui, Inter, -apple-system, sans-serif;
             background: var(--bg);
             color: var(--text-primary);
             line-height: 1.6;
@@ -68,8 +69,10 @@
         }
 
         .header h1 {
+            font-family: Georgia, "Anthropic Serif", serif;
             font-size: 20px;
-            font-weight: 600;
+            font-weight: 500;
+            line-height: 1.20;
             margin-bottom: 4px;
         }
 
@@ -226,7 +229,7 @@
 
         @media (prefers-color-scheme: dark) {
             .bookmark-btn.bookmarked {
-                background: #1c1500;
+                background: #1e1200;
                 border-color: #f59e0b;
             }
         }
@@ -317,7 +320,7 @@
 
         .filter-bar input:focus,
         .filter-bar select:focus {
-            outline: 2px solid var(--accent);
+            outline: 2px solid var(--focus);
             outline-offset: -1px;
         }
 
