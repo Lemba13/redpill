@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}RedPill — Bookmarks{% endblock %}
+{% block content %}
+<div class="header">
+    <h1>Bookmarks</h1>
+    <p class="subtitle">Articles saved for later reading</p>
+    <p style="margin-top: 6px; font-size: 13px;">
+        <a href="/" class="back-link">← All digests</a>
+        &nbsp;·&nbsp;
+        <a href="/history" class="back-link">History →</a>
+        &nbsp;·&nbsp;
+        <a href="/bookmarks" class="back-link">Bookmarks</a>
+    </p>
+</div>
+
+{% if not bookmarks %}
+<p style="color: var(--text-muted); text-align: center; margin-top: 48px;">
+    No bookmarks yet. Use the 🔖 ribbon icon on any article to save it here.
+</p>
+{% else %}
+
+{% for b in bookmarks %}
+<div class="item-card" id="bookmark-{{ b.item_id }}">
+    <div class="item-title">
+        <a href="{{ b.url }}" target="_blank" rel="noopener"
+           style="color: var(--text-primary); text-decoration: none;">{{ b.title }}</a>
+    </div>
+    {% if b.key_insight %}
+    <div class="item-insight">{{ b.key_insight }}</div>
+    {% endif %}
+    <div class="item-summary">{{ b.summary }}</div>
+
+    <div class="item-actions" style="margin-top: 12px;">
+        <span style="font-size: 13px; color: var(--text-muted);">
+            From digest <a href="/digest/{{ b.digest_date }}"
+                           style="color: var(--accent);">{{ b.digest_date }}</a>
+        </span>
+        <a href="{{ b.url }}" target="_blank" rel="noopener" class="source-link">
+            Read source ↗
+        </a>
+        <button class="bookmark-btn bookmarked"
+                onclick="toggleBookmark('{{ b.item_id }}', this)"
+                aria-label="Remove bookmark">🔖</button>
+    </div>
+</div>
+{% endfor %}
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function toggleBookmark(itemId, btn) {
+    try {
+        const res = await fetch('/api/bookmark', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: itemId })
+        });
+        if (!res.ok) throw new Error('Bookmark failed');
+        const data = await res.json();
+        if (!data.bookmarked) {
+            const card = document.getElementById('bookmark-' + itemId);
+            if (card) card.remove();
+        }
+    } catch (err) {
+        console.error('Bookmark failed:', err);
+    }
+}
+</script>
+{% endblock %}

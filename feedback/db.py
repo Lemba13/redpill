@@ -73,6 +73,18 @@ CREATE TABLE IF NOT EXISTS votes (
 )
 """
 
+_CREATE_BOOKMARKS_SQL = """
+CREATE TABLE IF NOT EXISTS bookmarks (
+    item_id       TEXT PRIMARY KEY,
+    title         TEXT NOT NULL,
+    url           TEXT NOT NULL,
+    summary       TEXT,
+    key_insight   TEXT,
+    digest_date   TEXT NOT NULL,
+    bookmarked_at TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
 
 def _open(db_path: str) -> sqlite3.Connection:
     """Open db_path, set row_factory, create tables if needed, return conn."""
@@ -81,6 +93,7 @@ def _open(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_CREATE_DIGEST_ITEMS_SQL)
     conn.execute(_CREATE_VOTES_SQL)
+    conn.execute(_CREATE_BOOKMARKS_SQL)
     # Safe migration for existing databases.
     try:
         conn.execute("ALTER TABLE digest_items ADD COLUMN dim_id TEXT")
@@ -427,6 +440,93 @@ class FeedbackDB:
         items = [dict(row) for row in rows]
         has_next = len(items) > page_size
         return {"items": items[:page_size], "has_next": has_next}
+
+    # ------------------------------------------------------------------
+    # Bookmarks
+    # ------------------------------------------------------------------
+
+    def toggle_bookmark(self, item_id: str) -> dict:
+        """Toggle a bookmark for *item_id*.
+
+        If the item is already bookmarked, delete it (unbookmark).
+        If not, copy fields from digest_items and insert into bookmarks.
+
+        Returns
+        -------
+        {"bookmarked": True}  after inserting
+        {"bookmarked": False} after deleting
+
+        Raises
+        ------
+        LookupError
+            If *item_id* does not exist in digest_items.
+        """
+        conn = _open(self._db_path)
+        try:
+            existing = conn.execute(
+                "SELECT 1 FROM bookmarks WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()
+
+            if existing:
+                conn.execute("DELETE FROM bookmarks WHERE item_id = ?", (item_id,))
+                conn.commit()
+                return {"bookmarked": False}
+
+            row = conn.execute(
+                """
+                SELECT item_id, title, url, summary, key_insight, digest_date
+                FROM digest_items
+                WHERE item_id = ?
+                LIMIT 1
+                """,
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"item_id {item_id!r} not found in digest_items")
+
+            conn.execute(
+                """
+                INSERT INTO bookmarks (item_id, title, url, summary, key_insight, digest_date)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["item_id"],
+                    row["title"] or "",
+                    row["url"] or "",
+                    row["summary"],
+                    row["key_insight"],
+                    row["digest_date"],
+                ),
+            )
+            conn.commit()
+            return {"bookmarked": True}
+        finally:
+            conn.close()
+
+    def get_bookmarked_ids(self) -> set:
+        """Return the set of all bookmarked item_ids."""
+        conn = _open(self._db_path)
+        try:
+            rows = conn.execute("SELECT item_id FROM bookmarks").fetchall()
+            return {row["item_id"] for row in rows}
+        finally:
+            conn.close()
+
+    def get_all_bookmarks(self) -> list[dict]:
+        """Return all bookmarks ordered by bookmarked_at descending."""
+        conn = _open(self._db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT item_id, title, url, summary, key_insight, digest_date, bookmarked_at
+                FROM bookmarks
+                ORDER BY bookmarked_at DESC
+                """,
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
 
     def get_available_digests(self) -> list[dict]:
         """Return digests that have been ingested, newest first.

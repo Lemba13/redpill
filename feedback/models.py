@@ -24,3 +24,16 @@ class VoteRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError("item_id must not be empty")
         return v.strip()
+
+
+class BookmarkRequest(BaseModel):
+    """Body accepted by POST /api/bookmark."""
+
+    item_id: str
+
+    @field_validator("item_id")
+    @classmethod
+    def item_id_must_be_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("item_id must not be empty")
+        return v.strip()

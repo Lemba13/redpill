@@ -5,6 +5,8 @@
     <h1>Article History</h1>
     <p class="subtitle">Every article that made it into a digest</p>
     <a href="/" class="back-link">← All digests</a>
+    &nbsp;·&nbsp;
+    <a href="/bookmarks" class="back-link">Bookmarks</a>
 </div>
 
 <form class="filter-bar" method="get" action="/history">
@@ -61,6 +63,9 @@
             <div class="history-domain">{{ item.domain }}</div>
         </div>
         <a class="history-source" href="{{ item.url }}" target="_blank" rel="noopener">↗</a>
+        <button class="bookmark-btn-sm {% if item.item_id in bookmarked_ids %}bookmarked{% endif %}"
+                onclick="toggleBookmark('{{ item.item_id }}', this)"
+                aria-label="Bookmark">🔖</button>
     </div>
     {% endfor %}
 </div>
@@ -73,4 +78,27 @@
 </div>
 
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function toggleBookmark(itemId, btn) {
+    try {
+        const res = await fetch('/api/bookmark', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: itemId })
+        });
+        if (!res.ok) throw new Error('Bookmark failed');
+        const data = await res.json();
+        if (data.bookmarked) {
+            btn.classList.add('bookmarked');
+        } else {
+            btn.classList.remove('bookmarked');
+        }
+    } catch (err) {
+        console.error('Bookmark failed:', err);
+    }
+}
+</script>
 {% endblock %}
