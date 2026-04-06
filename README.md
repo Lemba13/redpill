@@ -142,7 +142,25 @@ redpill terms --recent 7       # terms seen in the last 7 days
 # Query planner (dry-run)
 redpill plan                   # show what queries would be planned next run
 redpill plan --max-queries 8   # override query count
+
+# Embedding visualizer
+redpill viz                    # 3D scatter of all seen articles (default db from config)
+redpill viz --db data/foo.db   # visualize a specific db
 ```
+
+### Embedding visualizer
+
+`redpill viz` reduces every seen article's embedding to 2D with UMAP and renders a self-contained interactive HTML file. X/Y axes are the semantic projection (similar articles cluster together); Z axis is `first_seen_date` so you can see how the corpus evolved over time. Points are colored by vote status — green for upvoted, red for downvoted, gray for not yet voted.
+
+Requires the `viz` optional dependency group and a `viz/` output directory:
+
+```bash
+pip install -e ".[viz]"
+mkdir -p viz
+redpill viz
+```
+
+Output files are written to `viz/embeddings-YYYYMMDD-HHMMSS.html` and accumulate over time (each run produces a new file). The `viz/` directory is gitignored. Open any file in a browser — no server required.
 
 ### Feedback service
 
@@ -167,6 +185,26 @@ The service exposes three pages:
 | `/history` | All articles across every digest in a compact searchable view — filter by keyword, date range, or domain |
 
 The feedback service and the pipeline are fully decoupled — they share only the filesystem (`data/digests/*.json`) and `feedback.db`. The pipeline reads `feedback.db` in read-only mode. If the service is down, the pipeline continues unaffected.
+
+## Directory structure
+
+```
+redpill/
+├── data/
+│   ├── redpill.db                  # main SQLite db (seen items, embeddings, terms, query log)
+│   │   or redpill_<topic>.db       # per-topic db when db_dir is set in config
+│   ├── feedback.db                 # votes and bookmarks (written by the feedback service)
+│   └── digests/
+│       └── YYYY-MM-DD.json         # feedback sidecars (one per pipeline run)
+├── viz/                            # gitignored — created manually
+│   └── embeddings-YYYYMMDD-HHMMSS.html  # viz output files (accumulate over time)
+├── sisyphus/                       # scheduling scripts
+├── redpill/                        # pipeline source
+├── feedback/                       # feedback service source
+└── config.yaml                     # your local config (gitignored)
+```
+
+`data/` is created automatically on first run. `viz/` must be created manually before using `redpill viz`.
 
 ## Smoke test
 
