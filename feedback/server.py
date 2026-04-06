@@ -28,7 +28,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from feedback.db import FeedbackDB
-from feedback.models import VoteRequest
+from feedback.models import BookmarkRequest, VoteRequest
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,7 @@ async def digest_page(date: str, request: Request) -> HTMLResponse:
             ) from exc
 
     items = db.get_digest_items(date)
+    bookmarked_ids = db.get_bookmarked_ids()
 
     # Derive topic from the first item (all items share the same topic).
     topic = items[0]["topic"] if items else date
@@ -155,6 +156,7 @@ async def digest_page(date: str, request: Request) -> HTMLResponse:
             "digest_date": date,
             "topic": topic,
             "items": items,
+            "bookmarked_ids": bookmarked_ids,
         },
     )
 
@@ -202,11 +204,14 @@ async def history_page(
 
     total_shown = sum(len(g["rows"]) for g in items_by_date)
 
+    bookmarked_ids = db.get_bookmarked_ids()
+
     return templates.TemplateResponse(
         request,
         "history.html",
         {
             "items_by_date": items_by_date,
+            "bookmarked_ids": bookmarked_ids,
             "has_next": result["has_next"],
             "page": page,
             "prev_url": _history_url(page - 1) if page > 1 else None,
@@ -253,6 +258,39 @@ async def record_vote(vote_request: VoteRequest) -> dict:
         "item_id": result["item_id"],
         "vote": result["vote"],
     }
+
+
+@app.post("/api/bookmark")
+async def toggle_bookmark(bookmark_request: BookmarkRequest) -> dict:
+    """Toggle a bookmark for a digest item.
+
+    Returns
+    -------
+    JSON: {"bookmarked": true}  after inserting
+          {"bookmarked": false} after deleting
+
+    Raises
+    ------
+    404 if item_id does not exist in feedback.db.
+    422 if the request body is malformed (handled by FastAPI/Pydantic).
+    """
+    try:
+        result = db.toggle_bookmark(item_id=bookmark_request.item_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return result
+
+
+@app.get("/bookmarks", response_class=HTMLResponse)
+async def bookmarks_page(request: Request) -> HTMLResponse:
+    """Bookmarks list page."""
+    bookmarks = db.get_all_bookmarks()
+    return templates.TemplateResponse(
+        request,
+        "bookmarks.html",
+        {"bookmarks": bookmarks},
+    )
 
 
 @app.get("/health")
