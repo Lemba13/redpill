@@ -956,6 +956,31 @@ def _cmd_terms(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# viz
+# ---------------------------------------------------------------------------
+
+
+def _cmd_viz(args: argparse.Namespace) -> None:
+    """Handler for: redpill viz [--config PATH] [--db PATH]."""
+    from redpill.viz import run_viz
+
+    config = _load_config(args.config)
+
+    if args.db:
+        db_path = Path(args.db).resolve()
+        if not db_path.exists():
+            print(f"Error: db file not found: {db_path}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        db_path = Path(resolve_db_path(config))
+
+    fb_cfg = get_feedback_config(config)
+    feedback_db_path: str | None = str(fb_cfg["db_path"]) if fb_cfg.get("db_path") else None
+
+    run_viz(str(db_path), feedback_db_path=feedback_db_path)
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -1087,6 +1112,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Show terms seen in the last DAYS days (default: 30 when flag is given).",
     )
     terms_parser.set_defaults(func=_cmd_terms)
+
+    # --- redpill viz ---
+    viz_parser = subparsers.add_parser(
+        "viz",
+        help="Visualize article embedding space as an interactive HTML scatter plot.",
+    )
+    viz_parser.add_argument(
+        "--config", "-c",
+        default=None,
+        metavar="PATH",
+        help="Path to config YAML (default: config.yaml → config.example.yaml).",
+    )
+    viz_parser.add_argument(
+        "--db",
+        default=None,
+        metavar="PATH",
+        help="Path to a redpill.db file to visualize (default: db_path from config.yaml).",
+    )
+    viz_parser.set_defaults(func=_cmd_viz)
 
     return parser
 
