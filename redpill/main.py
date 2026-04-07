@@ -307,6 +307,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
         logger.info("Query planning enabled (max_queries=%d) ...", max_queries)
         planner_conn = sqlite3.connect(db_path)
         planner_conn.row_factory = sqlite3.Row
+        _planner_ok = False
         try:
             planned_queries = plan_queries(
                 topic,
@@ -324,10 +325,16 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
                 saturation_decay_days=int(qp_cfg.get("saturation_decay_days", 7)),
                 saturation_penalty_weight=float(qp_cfg.get("saturation_penalty_weight", 0.3)),
             )
+            _planner_ok = True
         except Exception as exc:
             logger.warning("Query planner raised unexpectedly (%s) — using fallback", exc)
             planned_queries = plan_queries_fallback(topic, planner_conn, max_queries=max_queries)
+            _planner_ok = True
         finally:
+            if _planner_ok:
+                planner_conn.commit()
+            else:
+                planner_conn.rollback()
             planner_conn.close()
     else:
         # Backward-compat: wrap static queries as plain base-source dicts.
@@ -766,11 +773,13 @@ def _cmd_plan(args: argparse.Namespace) -> None:
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    _plan_ok = False
     try:
         if llm_client is not None:
             queries = plan_queries(topic, conn, llm_client, max_queries=max_queries)
         else:
             queries = plan_queries_fallback(topic, conn, max_queries=max_queries)
+        _plan_ok = True
 
         # Show bandit pool state if available.
         try:
@@ -822,6 +831,10 @@ def _cmd_plan(args: argparse.Namespace) -> None:
             logger.debug("Could not show bandit pool state: %s", exc)
 
     finally:
+        if _plan_ok:
+            conn.commit()
+        else:
+            conn.rollback()
         conn.close()
 
     print(f"Planned {len(queries)} query/ies for topic: {topic!r}\n")
