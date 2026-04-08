@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import smtplib
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -164,6 +165,24 @@ def write_digest_sidecar(
     }
 
     out_path = out_dir / f"{date}.json"
+
+    if out_path.exists():
+        try:
+            existing_payload = json.loads(out_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DeliveryError(
+                f"write_digest_sidecar: cannot read existing sidecar {out_path!r}: {exc}"
+            ) from exc
+        # Merge by item_id; run 2 wins on conflict (safe because dedup
+        # prevents true duplicates, but correctness requires a defined winner).
+        merged: dict[str, dict] = {
+            item["item_id"]: item for item in existing_payload.get("items", [])
+        }
+        merged.update({item["item_id"]: item for item in payload["items"]})
+        payload["items"] = list(merged.values())
+
+    payload["item_count"] = len(payload["items"])
+
     try:
         out_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -217,19 +236,25 @@ def deliver_markdown(digest: str, output_dir: str, date: str) -> Path:
 
     out_path = out_dir / f"{date}.md"
 
-    if out_path.exists():
-        logger.warning(
-            "deliver_markdown: %s already exists — overwriting", out_path
-        )
-
     try:
-        out_path.write_text(digest, encoding="utf-8")
+        if out_path.exists():
+            existing = out_path.read_text(encoding="utf-8")
+            run_time = datetime.now().strftime("%H:%M")
+            # Count existing runs by counting separators already in the file.
+            run_number = existing.count("\n\n---\n\n## Run ") + 2
+            separator = f"\n\n---\n\n## Run {run_number}, {run_time}\n\n"
+            out_path.write_text(existing + separator + digest, encoding="utf-8")
+            logger.info(
+                "deliver_markdown: appended run %d to %s", run_number, out_path
+            )
+        else:
+            out_path.write_text(digest, encoding="utf-8")
+            logger.info("deliver_markdown: digest written to %s", out_path)
     except OSError as exc:
         raise DeliveryError(
             f"deliver_markdown: cannot write digest to {out_path!r}: {exc}"
         ) from exc
 
-    logger.info("deliver_markdown: digest written to %s", out_path)
     return out_path
 
 

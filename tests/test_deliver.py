@@ -5,8 +5,10 @@ No real filesystem paths outside of tmp_path are touched. No real SMTP
 connection is ever made. All network I/O is intercepted via unittest.mock.
 
 Test structure:
-    TestDeliverMarkdown     — file creation, overwrite behaviour, return value,
-                              directory creation, error handling
+    TestDeliverMarkdown     — file creation, collision (append) behaviour, return
+                              value, directory creation, error handling
+    TestWriteDigestSidecar  — first-run write, collision merge, item preservation,
+                              item_count correctness
     TestMarkdownToHtml      — HTML conversion correctness and structure
     TestBuildEmail          — MIME message structure and headers
     TestDeliverEmail        — SMTP interaction, env var handling, error mapping
@@ -14,6 +16,7 @@ Test structure:
     TestDeliver             — dispatcher routing, config validation, error contract
 """
 
+import json
 import os
 import smtplib
 from pathlib import Path
@@ -21,6 +24,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+import redpill.deliver as deliver_mod
 from redpill.deliver import (
     DeliveryError,
     _build_email,
@@ -29,6 +33,8 @@ from redpill.deliver import (
     deliver,
     deliver_email,
     deliver_markdown,
+    generate_item_id,
+    write_digest_sidecar,
 )
 
 
@@ -92,19 +98,29 @@ class TestDeliverMarkdown:
         assert result.exists()
         assert result.parent == nested.resolve()
 
-    def test_overwrites_existing_file(self, tmp_path: Path) -> None:
+    def test_appends_to_existing_file_on_second_run(self, tmp_path: Path) -> None:
+        # Second call must not silently overwrite — it appends with a separator.
         path = tmp_path / "2026-03-07.md"
-        path.write_text("old content", encoding="utf-8")
-        deliver_markdown(SAMPLE_DIGEST, str(tmp_path), "2026-03-07")
-        assert path.read_text(encoding="utf-8") == SAMPLE_DIGEST
+        deliver_markdown("# Run 1\n", str(tmp_path), "2026-03-07")
+        deliver_markdown("# Run 2\n", str(tmp_path), "2026-03-07")
+        content = path.read_text(encoding="utf-8")
+        assert "# Run 1" in content
+        assert "# Run 2" in content
+        assert "---" in content
 
-    def test_overwrite_emits_warning(self, tmp_path: Path, caplog) -> None:
-        path = tmp_path / "2026-03-07.md"
-        path.write_text("old content", encoding="utf-8")
-        import logging
-        with caplog.at_level(logging.WARNING, logger="redpill.deliver"):
-            deliver_markdown(SAMPLE_DIGEST, str(tmp_path), "2026-03-07")
-        assert any("already exists" in r.message for r in caplog.records)
+    def test_second_run_includes_run_number_in_separator(self, tmp_path: Path) -> None:
+        deliver_markdown("# Run 1\n", str(tmp_path), "2026-03-07")
+        deliver_markdown("# Run 2\n", str(tmp_path), "2026-03-07")
+        content = (tmp_path / "2026-03-07.md").read_text(encoding="utf-8")
+        assert "## Run 2," in content
+
+    def test_third_run_separator_increments_run_number(self, tmp_path: Path) -> None:
+        deliver_markdown("# Run 1\n", str(tmp_path), "2026-03-07")
+        deliver_markdown("# Run 2\n", str(tmp_path), "2026-03-07")
+        deliver_markdown("# Run 3\n", str(tmp_path), "2026-03-07")
+        content = (tmp_path / "2026-03-07.md").read_text(encoding="utf-8")
+        assert "## Run 2," in content
+        assert "## Run 3," in content
 
     def test_no_warning_on_first_write(self, tmp_path: Path, caplog) -> None:
         import logging
@@ -128,6 +144,179 @@ class TestDeliverMarkdown:
         deliver_markdown(digest_with_unicode, str(tmp_path), "2026-03-07")
         raw_bytes = (tmp_path / "2026-03-07.md").read_bytes()
         assert raw_bytes == digest_with_unicode.encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# TestWriteDigestSidecar
+# ---------------------------------------------------------------------------
+
+
+def _make_item(url: str, title: str = "A title", relevance: int = 3) -> dict:
+    """Minimal item dict accepted by write_digest_sidecar."""
+    return {
+        "url": url,
+        "title": title,
+        "summary": "A summary.",
+        "key_insight": "An insight.",
+        "relevance_score": relevance,
+    }
+
+
+class TestWriteDigestSidecar:
+    """Tests for the collision-safe sidecar writer.
+
+    All writes go into tmp_path via monkeypatch so data/digests/ is never
+    touched during the test run.
+    """
+
+    def _call(self, tmp_path: Path, items: list[dict], monkeypatch, date: str = "2026-03-07") -> Path:
+        """Call write_digest_sidecar with _SIDECAR_DIR redirected to tmp_path."""
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        return write_digest_sidecar(
+            items=items,
+            topic="test topic",
+            date=date,
+            feedback_base_url="http://localhost:8080",
+        )
+
+    # --- first-run behaviour ---
+
+    def test_first_run_creates_file(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._call(tmp_path, [_make_item("https://a.example/1")], monkeypatch)
+        assert path.exists()
+
+    def test_first_run_returns_correct_path(self, tmp_path: Path, monkeypatch) -> None:
+        path = self._call(tmp_path, [_make_item("https://a.example/1")], monkeypatch)
+        assert path == tmp_path / "2026-03-07.json"
+
+    def test_first_run_item_count_matches_items(self, tmp_path: Path, monkeypatch) -> None:
+        items = [_make_item(f"https://a.example/{i}") for i in range(5)]
+        self._call(tmp_path, items, monkeypatch)
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        assert payload["item_count"] == 5
+        assert len(payload["items"]) == 5
+
+    def test_first_run_generates_stable_item_ids(self, tmp_path: Path, monkeypatch) -> None:
+        url = "https://a.example/stable"
+        self._call(tmp_path, [_make_item(url)], monkeypatch)
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        assert payload["items"][0]["item_id"] == generate_item_id(url)
+
+    def test_first_run_stores_topic_and_date(self, tmp_path: Path, monkeypatch) -> None:
+        self._call(tmp_path, [_make_item("https://a.example/1")], monkeypatch)
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        assert payload["topic"] == "test topic"
+        assert payload["digest_date"] == "2026-03-07"
+
+    # --- second-run collision handling ---
+
+    def test_second_run_merges_disjoint_items(self, tmp_path: Path, monkeypatch) -> None:
+        """Items from run 1 and run 2 should both be present after run 2."""
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        run1_items = [_make_item("https://a.example/run1")]
+        run2_items = [_make_item("https://a.example/run2")]
+
+        write_digest_sidecar(run1_items, "test", "2026-03-07", "http://localhost:8080")
+        write_digest_sidecar(run2_items, "test", "2026-03-07", "http://localhost:8080")
+
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        ids = {item["item_id"] for item in payload["items"]}
+        assert generate_item_id("https://a.example/run1") in ids
+        assert generate_item_id("https://a.example/run2") in ids
+
+    def test_second_run_item_count_reflects_merged_total(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        run1_items = [_make_item("https://a.example/r1-a"), _make_item("https://a.example/r1-b")]
+        run2_items = [_make_item("https://a.example/r2-a")]
+
+        write_digest_sidecar(run1_items, "test", "2026-03-07", "http://localhost:8080")
+        write_digest_sidecar(run2_items, "test", "2026-03-07", "http://localhost:8080")
+
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        # 2 unique from run 1 + 1 unique from run 2 = 3 total
+        assert payload["item_count"] == 3
+        assert len(payload["items"]) == 3
+
+    def test_second_run_run2_wins_on_duplicate_url(self, tmp_path: Path, monkeypatch) -> None:
+        """Same URL in both runs: run 2's version of the item should be kept."""
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        url = "https://a.example/shared"
+        run1_items = [_make_item(url, title="Run 1 title")]
+        run2_items = [_make_item(url, title="Run 2 title")]
+
+        write_digest_sidecar(run1_items, "test", "2026-03-07", "http://localhost:8080")
+        write_digest_sidecar(run2_items, "test", "2026-03-07", "http://localhost:8080")
+
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        item = next(i for i in payload["items"] if i["item_id"] == generate_item_id(url))
+        assert item["title"] == "Run 2 title"
+
+    def test_second_run_duplicate_does_not_inflate_count(self, tmp_path: Path, monkeypatch) -> None:
+        """An item present in both runs must count as one, not two."""
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        url = "https://a.example/shared"
+
+        write_digest_sidecar([_make_item(url)], "test", "2026-03-07", "http://localhost:8080")
+        write_digest_sidecar([_make_item(url)], "test", "2026-03-07", "http://localhost:8080")
+
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        assert payload["item_count"] == 1
+        assert len(payload["items"]) == 1
+
+    def test_run1_only_items_preserved_when_run2_has_different_items(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Items that appeared in run 1 but not run 2 must still be in the sidecar."""
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        run1_exclusive_url = "https://a.example/only-in-run1"
+        run1_items = [
+            _make_item(run1_exclusive_url),
+            _make_item("https://a.example/shared"),
+        ]
+        run2_items = [
+            _make_item("https://a.example/only-in-run2"),
+            _make_item("https://a.example/shared"),
+        ]
+
+        write_digest_sidecar(run1_items, "test", "2026-03-07", "http://localhost:8080")
+        write_digest_sidecar(run2_items, "test", "2026-03-07", "http://localhost:8080")
+
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        ids = {item["item_id"] for item in payload["items"]}
+        assert generate_item_id(run1_exclusive_url) in ids, (
+            "item from run 1 was dropped — merge failed to preserve orphaned entries"
+        )
+
+    def test_item_count_equals_len_items_after_merge(self, tmp_path: Path, monkeypatch) -> None:
+        """item_count must always equal len(items) — never stale from the old file."""
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        run1_items = [_make_item(f"https://a.example/{i}") for i in range(4)]
+        run2_items = [_make_item(f"https://a.example/{i}") for i in range(2, 7)]
+
+        write_digest_sidecar(run1_items, "test", "2026-03-07", "http://localhost:8080")
+        write_digest_sidecar(run2_items, "test", "2026-03-07", "http://localhost:8080")
+
+        payload = json.loads((tmp_path / "2026-03-07.json").read_text())
+        # Unique URLs: 0,1,2,3 from run1 + 4,5,6 new from run2 = 7 total
+        assert payload["item_count"] == len(payload["items"])
+        assert payload["item_count"] == 7
+
+    # --- isolation: different dates don't interfere ---
+
+    def test_different_dates_write_separate_files(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(deliver_mod, "_SIDECAR_DIR", str(tmp_path))
+        write_digest_sidecar(
+            [_make_item("https://a.example/1")], "test", "2026-03-07", "http://localhost:8080"
+        )
+        write_digest_sidecar(
+            [_make_item("https://a.example/2")], "test", "2026-03-08", "http://localhost:8080"
+        )
+        assert (tmp_path / "2026-03-07.json").exists()
+        assert (tmp_path / "2026-03-08.json").exists()
+        payload_07 = json.loads((tmp_path / "2026-03-07.json").read_text())
+        payload_08 = json.loads((tmp_path / "2026-03-08.json").read_text())
+        assert payload_07["item_count"] == 1
+        assert payload_08["item_count"] == 1
 
 
 # ---------------------------------------------------------------------------
