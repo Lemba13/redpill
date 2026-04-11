@@ -597,6 +597,46 @@ def get_top_terms_conn(
     return result
 
 
+def get_top_terms_for_dim_conn(
+    topic: str,
+    dim_id: str,
+    n: int,
+    conn: sqlite3.Connection,
+) -> list[str]:
+    """Return the top n term strings associated with a specific dimension.
+
+    Joins extracted_terms → seen_items via source_url to filter by dim_id.
+    Returns an empty list if no data exists for this dim_id yet — expected on
+    early runs or for new dimensions.  Never raises.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT et.term
+            FROM extracted_terms et
+            JOIN seen_items si ON et.source_url = si.url
+            WHERE si.topic = ?
+              AND si.dim_id = ?
+              AND et.topic = ?
+            ORDER BY et.frequency DESC
+            LIMIT ?
+            """,
+            (topic, dim_id, topic, n),
+        ).fetchall()
+        result = [row["term"] for row in rows]
+        logger.debug(
+            "get_top_terms_for_dim_conn(topic=%r, dim_id=%r, n=%d): %d term(s)",
+            topic, dim_id, n, len(result),
+        )
+        return result
+    except Exception as exc:
+        logger.warning(
+            "get_top_terms_for_dim_conn(topic=%r, dim_id=%r): query failed: %s",
+            topic, dim_id, exc,
+        )
+        return []
+
+
 # ---------------------------------------------------------------------------
 # query_log — internal implementations
 # ---------------------------------------------------------------------------

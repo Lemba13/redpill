@@ -43,6 +43,8 @@ from redpill.state import (
     get_query_performance,
     get_recent_terms,
     get_top_terms,
+    get_top_terms_conn,
+    get_top_terms_for_dim_conn,
     init_db,
     log_query,
     store_extracted_terms,
@@ -448,14 +450,43 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
     # Step 7: Summarize
     # ------------------------------------------------------------------
     logger.info("Summarizing %d item(s) ...", len(new_items))
+
+    # Load term context for key_insight enrichment. planner_conn is already
+    # closed at this point, so open a fresh read-only connection. Any failure
+    # here degrades gracefully — the loop runs exactly as before.
+    global_terms: list[str] = []
+    dimension_terms_map: dict[str, list[str]] = {}
+    try:
+        _terms_conn = sqlite3.connect(db_path)
+        _terms_conn.row_factory = sqlite3.Row
+        try:
+            raw_global = get_top_terms_conn(topic, limit=12, conn=_terms_conn)
+            global_terms = [r["term"] for r in raw_global]
+            dim_ids_in_run = {
+                item.get("dim_id") for item in new_items if item.get("dim_id")
+            }
+            for dim_id in dim_ids_in_run:
+                dimension_terms_map[dim_id] = get_top_terms_for_dim_conn(
+                    topic, dim_id, n=6, conn=_terms_conn
+                )
+        finally:
+            _terms_conn.close()
+    except Exception as exc:
+        logger.warning("Failed to load term context for key_insight enrichment: %s", exc)
+        global_terms = []
+        dimension_terms_map = {}
+
     summarized: list[dict] = []
     for item in new_items:
         try:
+            dim_id = item.get("dim_id") or "dim_fallback"
             result = summarize_item(
                 item,
                 topic=topic,
                 client=llm_client,
                 db_path=db_path if not dry_run else None,
+                global_terms=global_terms or None,
+                dimension_terms=dimension_terms_map.get(dim_id) or None,
             )
             # summarize_item always returns; it uses a fallback on LLM errors.
             # Attach the original item fields we still need for state persistence
@@ -464,7 +495,7 @@ def run_pipeline(config_path: str | None = None, dry_run: bool = False) -> None:
             result["_snippet"] = item.get("snippet") or ""
             result["source_query"] = item.get("source_query") or ""
             result["plan_dimension"] = item.get("plan_dimension") or ""
-            result["dim_id"] = item.get("dim_id") or "dim_fallback"
+            result["dim_id"] = dim_id
             summarized.append(result)
         except Exception as exc:
             # Belt-and-suspenders: summarize_item is designed not to raise,

@@ -290,6 +290,137 @@ class TestBuildSummarizePrompt:
         result = _build_summarize_prompt("topic", "content")
         assert isinstance(result, str)
 
+    def test_no_terms_prompt_unchanged(self):
+        """Calling with no new args produces the same output as before."""
+        baseline = _build_summarize_prompt("machine learning", "article text")
+        assert "Research context" not in baseline
+        assert 'one sentence explaining why this matters for someone' in baseline
+
+    def test_none_terms_prompt_unchanged(self):
+        result = _build_summarize_prompt(
+            "machine learning", "article text",
+            global_terms=None, dimension_terms=None, dimension=None,
+        )
+        assert "Research context" not in result
+        assert 'one sentence explaining why this matters for someone' in result
+
+    def test_empty_lists_no_context_block(self):
+        result = _build_summarize_prompt(
+            "AI", "content", global_terms=[], dimension_terms=[],
+        )
+        assert "Research context" not in result
+
+    def test_global_terms_only_injects_context_block(self):
+        result = _build_summarize_prompt(
+            "AI", "content", global_terms=["transformers", "llm"],
+        )
+        assert "Research context" in result
+        assert "transformers, llm" in result
+        assert "Concepts seen specifically" not in result
+
+    def test_dimension_terms_without_global_terms(self):
+        result = _build_summarize_prompt(
+            "AI", "content",
+            global_terms=None,
+            dimension_terms=["rag", "retrieval"],
+            dimension="AI Search",
+        )
+        assert "Concepts seen specifically" in result
+        assert "rag, retrieval" in result
+        assert "Concepts already well-covered" not in result
+
+    def test_both_terms_full_context_block(self):
+        result = _build_summarize_prompt(
+            "AI", "content",
+            global_terms=["llm"],
+            dimension_terms=["rag"],
+            dimension="AI Search",
+        )
+        assert "Concepts already well-covered" in result
+        assert "Concepts seen specifically" in result
+
+    def test_context_block_before_article_content(self):
+        result = _build_summarize_prompt(
+            "AI", "article text", global_terms=["llm"],
+        )
+        assert result.index("Research context") < result.index("Article content")
+
+    def test_dimension_framing_in_key_insight(self):
+        result = _build_summarize_prompt(
+            "AI", "content", global_terms=["llm"], dimension="AI Safety",
+        )
+        assert "AI Safety" in result
+        assert "Be opinionated" in result
+
+    def test_no_dimension_key_insight_fallback(self):
+        result = _build_summarize_prompt(
+            "AI", "content", global_terms=["llm"], dimension=None,
+        )
+        assert 'one sentence explaining why this matters for someone' in result
+        assert "Be opinionated" not in result
+
+    def test_brace_safety_with_terms(self):
+        """Term strings containing braces must not raise."""
+        result = _build_summarize_prompt(
+            "AI", "content", global_terms=["{curly}", "normal"],
+        )
+        assert "{curly}" in result
+
+
+# ---------------------------------------------------------------------------
+# TestSummarizeItemContextInjection
+# ---------------------------------------------------------------------------
+
+
+class TestSummarizeItemContextInjection:
+    def test_new_params_accepted(self):
+        client = _FixedClient(_good_json_response())
+        result = summarize_item(
+            _make_item(), topic="AI", client=client,
+            global_terms=["foo"], dimension_terms=["bar"],
+        )
+        assert set(result.keys()) == {"title", "summary", "key_insight", "relevance_score", "url"}
+
+    def test_global_terms_reach_prompt(self):
+        client = _FixedClient(_good_json_response())
+        summarize_item(_make_item(), topic="AI", client=client, global_terms=["unique_term_xyz"])
+        assert "unique_term_xyz" in client.calls[0]["prompt"]
+
+    def test_dimension_terms_absent_when_none(self):
+        client = _FixedClient(_good_json_response())
+        summarize_item(_make_item(), topic="AI", client=client, dimension_terms=None)
+        assert "Concepts seen specifically" not in client.calls[0]["prompt"]
+
+    def test_plan_dimension_read_from_item(self):
+        client = _FixedClient(_good_json_response())
+        item = {**_make_item(), "plan_dimension": "AI Safety"}
+        summarize_item(item, topic="AI", client=client, global_terms=["llm"])
+        prompt = client.calls[0]["prompt"]
+        assert "AI Safety" in prompt
+        assert "Be opinionated" in prompt
+
+    def test_empty_plan_dimension_fallback(self):
+        client = _FixedClient(_good_json_response())
+        item = {**_make_item(), "plan_dimension": ""}
+        summarize_item(item, topic="AI", client=client, global_terms=["llm"])
+        prompt = client.calls[0]["prompt"]
+        assert 'one sentence explaining why this matters for someone' in prompt
+
+    def test_missing_plan_dimension_field_fallback(self):
+        client = _FixedClient(_good_json_response())
+        item = _make_item()  # no plan_dimension key
+        summarize_item(item, topic="AI", client=client, global_terms=["llm"])
+        prompt = client.calls[0]["prompt"]
+        assert 'one sentence explaining why this matters for someone' in prompt
+
+    def test_none_terms_no_regression(self):
+        client = _FixedClient(_good_json_response(key_insight="This is significant."))
+        result = summarize_item(
+            _make_item(), topic="AI", client=client,
+            global_terms=None, dimension_terms=None,
+        )
+        assert result["key_insight"] == "This is significant."
+
 
 # ---------------------------------------------------------------------------
 # TestSummarizeItem
