@@ -46,27 +46,86 @@ _SYSTEM_PROMPT = (
     "preamble, no commentary."
 )
 
-def _build_summarize_prompt(topic: str, content: str) -> str:
+def _build_summarize_prompt(
+    topic: str,
+    content: str,
+    global_terms: list[str] | None = None,
+    dimension_terms: list[str] | None = None,
+    dimension: str | None = None,
+) -> str:
     """Build the summarization prompt by explicit concatenation.
 
-    We deliberately avoid str.format() here because both *topic* and *content*
-    come from untrusted external sources and may contain literal brace
-    characters (e.g. code snippets, JSON fragments). A stray '{' in the
+    We deliberately avoid str.format() here because *topic*, *content*, and
+    term strings come from untrusted external sources and may contain literal
+    brace characters (e.g. code snippets, JSON fragments). A stray '{' in the
     article text would cause str.format() to raise KeyError or ValueError.
+
+    Parameters
+    ----------
+    global_terms:
+        Top terms seen across the whole topic. Injected as context when
+        non-empty so the LLM can identify what is already well-covered.
+    dimension_terms:
+        Top terms seen specifically for *dimension*. Injected only when
+        non-empty.
+    dimension:
+        The research angle (e.g. "AI Safety"). When non-empty, the key_insight
+        instruction is scoped to this angle rather than the broad topic.
     """
-    return (
-        "Topic: " + topic + "\n\n"
-        "Article content:\n" + content + "\n\n"
-        "Respond with a JSON object containing exactly these four keys:\n"
-        '- "title": a concise, descriptive title for the article (string)\n'
-        '- "summary": a 2-3 sentence summary of the article (string)\n'
-        '- "key_insight": one sentence explaining why this matters for someone '
-        'tracking "' + topic + '" (string)\n'
+    has_global = bool(global_terms)
+    has_dim = bool(dimension_terms)
+    has_context = has_global or has_dim
+    has_dimension = bool(dimension)
+
+    prompt = "Topic: " + topic + "\n\n"
+
+    if has_context:
+        prompt += "Research context:\n"
+        if has_global:
+            prompt += (
+                "- Concepts already well-covered across this topic: "
+                + ", ".join(global_terms)  # type: ignore[arg-type]
+                + "\n"
+            )
+        if has_dim:
+            prompt += (
+                '- Concepts seen specifically in the "' + (dimension or topic) + '" angle: '
+                + ", ".join(dimension_terms)  # type: ignore[arg-type]
+                + "\n"
+            )
+        prompt += (
+            "\nUse this context to identify what is novel or additive in the article below.\n"
+            "If this article covers well-trodden ground, say so in the key_insight.\n"
+            "If it introduces something not seen before, highlight that specifically.\n\n"
+        )
+
+    prompt += "Article content:\n" + content + "\n\n"
+    prompt += "Respond with a JSON object containing exactly these four keys:\n"
+    prompt += '- "title": a concise, descriptive title for the article (string)\n'
+    prompt += '- "summary": a 2-3 sentence summary of the article (string)\n'
+
+    if has_dimension:
+        prompt += (
+            '- "key_insight": one sentence about why this matters specifically for the "'
+            + dimension  # type: ignore[operator]
+            + '" angle of '
+            + topic
+            + ". Be opinionated — use the context above to highlight what is genuinely "
+            "new or different, not just restate what the article does. (string)\n"
+        )
+    else:
+        prompt += (
+            '- "key_insight": one sentence explaining why this matters for someone '
+            'tracking "' + topic + '" (string)\n'
+        )
+
+    prompt += (
         '- "relevance_score": an integer from 1 to 5 indicating how relevant '
         'this article is to "' + topic + '" '
         "(1 = barely related, 5 = highly relevant)\n\n"
         "Return only the JSON object. No markdown, no explanation."
     )
+    return prompt
 
 # ---------------------------------------------------------------------------
 # LLMClient protocol
@@ -491,6 +550,8 @@ def summarize_item(
     topic: str,
     client: LLMClient,
     db_path: str | None = None,
+    global_terms: list[str] | None = None,
+    dimension_terms: list[str] | None = None,
 ) -> dict:
     """Summarize one article item using the provided LLM client.
 
@@ -517,6 +578,14 @@ def summarize_item(
         When provided, the raw LLM response (and thinking trace, if any) are
         written to the llm_call_log table in this database.  Pass None to
         skip logging (default, so existing callers are unaffected).
+    global_terms:
+        Top terms seen across the whole topic. When non-empty, injected into
+        the prompt so the LLM can identify what is already well-covered.
+        Pass None (default) for identical behaviour to previous versions.
+    dimension_terms:
+        Top terms seen for the specific research dimension this item came from.
+        When non-empty, injected alongside global_terms.
+        Pass None (default) to omit the dimension-scoped context line.
 
     Returns
     -------
@@ -525,6 +594,7 @@ def summarize_item(
     url: str = item.get("url", "")
     content: str | None = item.get("content")
     snippet: str = item.get("snippet", "")
+    dimension: str = item.get("plan_dimension") or ""
 
     # Use full content when available; fall back to the search snippet.
     text = content if content and content.strip() else snippet
@@ -535,7 +605,13 @@ def summarize_item(
         )
         return {**_FALLBACK_SUMMARY, "url": url}
 
-    prompt = _build_summarize_prompt(topic=topic, content=text)
+    prompt = _build_summarize_prompt(
+        topic=topic,
+        content=text,
+        global_terms=global_terms or None,
+        dimension_terms=dimension_terms or None,
+        dimension=dimension or None,
+    )
 
     logger.debug("summarize_item: sending %d chars to LLM for url=%r", len(text), url)
 
