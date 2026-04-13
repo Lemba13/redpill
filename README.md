@@ -146,7 +146,18 @@ redpill plan --max-queries 8   # override query count
 # Embedding visualizer
 redpill viz                    # 3D scatter of all seen articles (default db from config)
 redpill viz --db data/foo.db   # visualize a specific db
+
+# Living knowledge base
+redpill animus                 # synthesise DB state into data/memory/KNOWLEDGE.md
+redpill animus --config my.yaml
+redpill animus --db-path data/redpill.db
 ```
+
+### Living knowledge base
+
+`redpill animus` reads the current DB state and produces `data/memory/KNOWLEDGE.md` — an opinionated, structured synthesis of everything collected so far. Each run archives the previous version as `data/memory/YYYY-MM-DD.md` before overwriting, creating an audit trail of how understanding evolved over time.
+
+On the first run (cold start) it synthesises all articles in the DB. On subsequent runs it picks up only what's new since the last write, so the LLM sees a focused delta rather than re-reading the entire history.
 
 ### Embedding visualizer
 
@@ -224,9 +235,11 @@ Two helper scripts in `sisyphus/` handle scheduling. They load `.env` automatica
 
 **`sisyphus/run_pipeline.sh`** — runs the daily pipeline, logs to `data/redpill.log`.
 
+**`sisyphus/run_animus.sh`** — runs `redpill animus`, logs to `data/animus.log`. Scheduled every 3 days so it accumulates a meaningful delta between runs.
+
 **`sisyphus/start_feedback.sh`** — starts the feedback service in the background via `nohup`, logs to `data/feedback.log`. Safe to call multiple times — skips if already running.
 
-Add both to your user crontab (`crontab -e`):
+Add to your user crontab (`crontab -e`):
 
 ```
 # Feedback service — start on every boot (60s delay for network to come up)
@@ -234,6 +247,9 @@ Add both to your user crontab (`crontab -e`):
 
 # Daily pipeline — runs at 10 AM
 0 10 * * * /path/to/redpill/sisyphus/run_pipeline.sh
+
+# Knowledge base synthesis — every 3 days at 11 AM (after pipeline has run)
+0 11 */3 * * /path/to/redpill/sisyphus/run_animus.sh
 ```
 
 Replace `/path/to/redpill` with your actual project path. No `sudo` required.

@@ -960,6 +960,13 @@ def _cmd_terms(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _cmd_animus(args: argparse.Namespace) -> None:
+    """Handler for: redpill animus [--config PATH] [--db-path PATH]."""
+    from redpill.animus import run_animus
+
+    run_animus(config_path=args.config, db_path=args.db_path)
+
+
 def _cmd_viz(args: argparse.Namespace) -> None:
     """Handler for: redpill viz [--config PATH] [--db PATH]."""
     from redpill.viz import run_viz
@@ -1131,6 +1138,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to a redpill.db file to visualize (default: db_path from config.yaml).",
     )
     viz_parser.set_defaults(func=_cmd_viz)
+
+    # --- redpill animus ---
+    animus_parser = subparsers.add_parser(
+        "animus",
+        help="Synthesise DB state into a living KNOWLEDGE.md document.",
+    )
+    animus_parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to config YAML (default: config.yaml → config.example.yaml).",
+    )
+    animus_parser.add_argument(
+        "--db-path",
+        default=None,
+        metavar="PATH",
+        dest="db_path",
+        help="Override the database path from config.",
+    )
+    animus_parser.set_defaults(func=_cmd_animus)
 
     return parser
 
