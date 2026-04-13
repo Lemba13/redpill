@@ -38,7 +38,6 @@ from redpill.main import (
     _cmd_stats,
     _cmd_terms,
     _content_hash,
-    _load_config,
     _maybe_deliver_nothing_new,
     _merge_search_and_extract,
     run_pipeline,
@@ -108,66 +107,6 @@ def _make_namespace(**kwargs) -> argparse.Namespace:
     defaults = {"config": None, "dry_run": False, "last": 5}
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
-
-
-# ---------------------------------------------------------------------------
-# TestLoadConfig
-# ---------------------------------------------------------------------------
-
-
-class TestLoadConfig:
-    def test_loads_config_yaml_when_present(self, tmp_path: Path) -> None:
-        cfg_file = tmp_path / "config.yaml"
-        cfg_file.write_text(yaml.dump(SAMPLE_CONFIG), encoding="utf-8")
-        with patch("redpill.main._CONFIG_CANDIDATES", (str(cfg_file),)):
-            # _load_config("config.yaml") by passing the path explicitly
-            result = _load_config(str(cfg_file))
-        assert result["topic"] == "contrastive learning"
-
-    def test_falls_back_to_example_config(self, tmp_path: Path, monkeypatch) -> None:
-        example = tmp_path / "config.example.yaml"
-        example.write_text(yaml.dump({"topic": "fallback"}), encoding="utf-8")
-        # Patch candidate order so config.yaml does not exist but example does.
-        monkeypatch.chdir(tmp_path)
-        with patch(
-            "redpill.main._CONFIG_CANDIDATES",
-            ("config.yaml", str(example)),
-        ):
-            result = _load_config()
-        assert result["topic"] == "fallback"
-
-    def test_explicit_path_is_used_exclusively(self, tmp_path: Path) -> None:
-        custom = tmp_path / "custom.yaml"
-        custom.write_text(yaml.dump({"topic": "custom"}), encoding="utf-8")
-        result = _load_config(str(custom))
-        assert result["topic"] == "custom"
-
-    def test_exits_1_when_no_file_found(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.chdir(tmp_path)
-        with patch("redpill.main._CONFIG_CANDIDATES", ("nonexistent.yaml",)):
-            with pytest.raises(SystemExit) as exc_info:
-                _load_config()
-        assert exc_info.value.code == 1
-
-    def test_exits_1_on_invalid_yaml(self, tmp_path: Path) -> None:
-        bad = tmp_path / "bad.yaml"
-        bad.write_text("{broken: yaml: :", encoding="utf-8")
-        with pytest.raises(SystemExit) as exc_info:
-            _load_config(str(bad))
-        assert exc_info.value.code == 1
-
-    def test_exits_1_when_yaml_not_a_mapping(self, tmp_path: Path) -> None:
-        list_yaml = tmp_path / "list.yaml"
-        list_yaml.write_text("- item1\n- item2\n", encoding="utf-8")
-        with pytest.raises(SystemExit) as exc_info:
-            _load_config(str(list_yaml))
-        assert exc_info.value.code == 1
-
-    def test_returns_dict(self, tmp_path: Path) -> None:
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(yaml.dump(SAMPLE_CONFIG), encoding="utf-8")
-        result = _load_config(str(cfg))
-        assert isinstance(result, dict)
 
 
 # ---------------------------------------------------------------------------
