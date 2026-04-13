@@ -14,9 +14,8 @@ import sys
 from pathlib import Path
 
 from redpill.config import load_config, resolve_db_path
-from redpill.llm_utils import strip_think_blocks
 from redpill.state import get_top_terms_conn, get_top_terms_for_dim_conn
-from redpill.summarize import OllamaClient, check_ollama
+from redpill.summarize import OllamaClient, PlannerLLMClient, check_ollama
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,18 @@ def run_animus(config_path: str | None = None, db_path: str | None = None) -> No
 
     ollama_cfg: dict = config.get("ollama_config", {})
     ollama_base_url: str = ollama_cfg.get("base_url", "http://localhost:11434")
-    ollama_model: str = ollama_cfg.get("model", "qwen3:4b")
+
+    planner_cfg: dict = config.get("planner_llm", {})
+    if planner_cfg.get("model"):
+        llm_base_url: str = planner_cfg.get("base_url", ollama_base_url)
+        llm_model: str = planner_cfg["model"]
+        llm_timeout: int = int(planner_cfg.get("timeout", 120))
+        llm_think: bool = bool(planner_cfg.get("think", True))
+    else:
+        llm_base_url = ollama_base_url
+        llm_model = ollama_cfg.get("model", "qwen3:4b")
+        llm_timeout = 120
+        llm_think = True
 
     print(f'redpill animus: topic="{topic}"')
 
@@ -108,21 +118,27 @@ def run_animus(config_path: str | None = None, db_path: str | None = None) -> No
     )
 
     try:
-        check_ollama(ollama_base_url, ollama_model)
+        check_ollama(llm_base_url, llm_model)
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    client = OllamaClient(base_url=ollama_base_url, model=ollama_model)
-    print(f"redpill animus: calling LLM (ollama / {ollama_model})...")
+    client = PlannerLLMClient(
+        base_url=llm_base_url,
+        model=llm_model,
+        think=llm_think,
+        timeout=llm_timeout,
+    )
+    think_label = " [thinking]" if llm_think else ""
+    print(f"redpill animus: calling LLM (ollama / {llm_model}{think_label})...")
 
     try:
-        raw_output = client.generate(prompt)
+        raw_output = client.generate(prompt, json_format=False)
     except RuntimeError as exc:
         print(f"ERROR: LLM call failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    output = strip_think_blocks(raw_output).strip()
+    output = raw_output.strip()
 
     if not _validate_output(output):
         print(
