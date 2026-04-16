@@ -1004,11 +1004,6 @@ def plan_queries(
                 )
                 explore_sels = select_explore_dims(n_explore, conn, topic)
 
-                for d in exploit_sels:
-                    d = dict(d)
-                for d in explore_sels:
-                    d = dict(d)
-
                 # Build proposed list as dicts with pool tag.
                 proposed: list[dict] = []
                 for d in exploit_sels:
@@ -1030,9 +1025,31 @@ def plan_queries(
                         for did in selected_ids
                         if did in dim_id_to_plan_dim
                     ]
+                    # For bandit-selected dims the LLM didn't propose, inject a
+                    # minimal plan dim so they still get queried and accumulate
+                    # run_count. Without this, the intersection can be empty and
+                    # all queries fall back to dim_fallback, stalling promotions.
+                    intersection_ids = {d["dim_id"] for d in plan["dimensions"]}
+                    n_injected = 0
+                    for d in final_dims:
+                        did = d["dim_id"]
+                        if did not in intersection_ids:
+                            plan["dimensions"].append({
+                                "name": d.get("canonical_name", did),
+                                "dim_id": did,
+                                "priority": "high",
+                                "coverage": "under-explored",
+                                "suggested_queries": [d.get("canonical_name", did)],
+                            })
+                            n_injected += 1
+                            logger.debug(
+                                "plan_queries: injected synthetic dim for bandit pick %r (%s)",
+                                d.get("canonical_name", did), did,
+                            )
                     logger.info(
-                        "plan_queries: bandit selected %d dims (exploit=%d explore=%d)",
-                        len(plan["dimensions"]), n_exploit, n_explore,
+                        "plan_queries: bandit intersection=%d injected=%d (exploit=%d explore=%d)",
+                        len(plan["dimensions"]) - n_injected, n_injected,
+                        n_exploit, n_explore,
                     )
             except Exception as exc:
                 logger.warning(
