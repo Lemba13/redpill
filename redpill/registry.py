@@ -336,20 +336,22 @@ def get_dimension_axis_tags(
 ) -> dict:
     """Return axis tags for a registered dimension.
 
-    Joins extracted_terms with seen_items on URL to find terms attributed
-    to this dimension via seen_items.dim_id. Falls back gracefully when
+    Joins term_occurrences with seen_items on URL to find terms attributed
+    to this dimension via seen_items.dim_id; category comes from
+    extracted_terms. Falls back gracefully when
     seen_items.dim_id is NULL (rows ingested before dim_id plumbing).
 
     Returns dict with keys: primary_axis (str), tags (list[str]), coverage (str).
     """
     rows = conn.execute(
         """
-        SELECT et.category, et.term, COUNT(*) AS freq
-        FROM extracted_terms et
-        JOIN seen_items si ON et.source_url = si.url
-        WHERE si.dim_id = ? AND et.topic = ?
-        GROUP BY et.category, et.term
-        ORDER BY freq DESC
+        SELECT et.category, tocc.term, COUNT(*) AS freq
+        FROM term_occurrences tocc
+        JOIN seen_items si ON tocc.source_url = si.url
+        JOIN extracted_terms et ON et.term = tocc.term AND et.topic = tocc.topic
+        WHERE si.dim_id = ? AND tocc.topic = ?
+        GROUP BY tocc.term
+        ORDER BY freq DESC, tocc.term ASC
         LIMIT 20
         """,
         (dim_id, topic),

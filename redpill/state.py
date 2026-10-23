@@ -26,6 +26,15 @@ extracted_terms:
     last_seen       DATE NOT NULL
     UNIQUE(term, topic)
 
+term_occurrences:
+    term            TEXT NOT NULL
+    topic           TEXT NOT NULL
+    source_url      TEXT NOT NULL
+    seen_date       DATE NOT NULL
+    PRIMARY KEY(term, topic, source_url)
+    -- one row per (term, article); extracted_terms.source_url only keeps the
+    -- latest URL, so per-dimension term lookups join through this table.
+
 query_log:
     id              INTEGER PRIMARY KEY AUTOINCREMENT
     query_text      TEXT NOT NULL
@@ -139,6 +148,16 @@ CREATE TABLE IF NOT EXISTS extracted_terms (
     frequency       INTEGER NOT NULL DEFAULT 1,
     last_seen       DATE NOT NULL,
     UNIQUE(term, topic)
+)
+"""
+
+_CREATE_TERM_OCCURRENCES_SQL = """
+CREATE TABLE IF NOT EXISTS term_occurrences (
+    term            TEXT NOT NULL,
+    topic           TEXT NOT NULL,
+    source_url      TEXT NOT NULL,
+    seen_date       DATE NOT NULL,
+    PRIMARY KEY (term, topic, source_url)
 )
 """
 
@@ -319,6 +338,23 @@ def init_db_conn(conn: sqlite3.Connection) -> None:
     """
     conn.execute(_CREATE_SEEN_ITEMS_SQL)
     conn.execute(_CREATE_EXTRACTED_TERMS_SQL)
+    conn.execute(_CREATE_TERM_OCCURRENCES_SQL)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_term_occurrences_url ON term_occurrences(source_url)"
+    )
+    # Backfill for databases that predate term_occurrences. Only the latest
+    # source_url per term survives in extracted_terms, so this is lossy, but it
+    # is the best history available. Runs on every init (idempotent: each row is
+    # a real occurrence) because the CREATE TABLE above autocommits, so a
+    # once-only backfill would be lost if the caller rolled back.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO term_occurrences (term, topic, source_url, seen_date)
+        SELECT term, topic, source_url, last_seen
+        FROM extracted_terms
+        WHERE source_url IS NOT NULL
+        """
+    )
     conn.execute(_CREATE_QUERY_LOG_SQL)
     conn.execute(_CREATE_RESEARCH_PLANS_SQL)
     conn.execute(_CREATE_DIMENSION_REGISTRY_SQL)
@@ -513,8 +549,12 @@ def store_extracted_terms_conn(
     ``source_title``, ``category``.
 
     On conflict (same term + topic already exists): increment frequency and
-    update last_seen.  The source_url and source_title are updated only when
-    the new values are non-NULL (preserves the earliest source on re-runs).
+    update last_seen.  The source_url and source_title are overwritten with the
+    new values when those are non-NULL, so they hold the latest source only.
+
+    Every (term, source_url) pair is also recorded in term_occurrences so
+    per-dimension lookups see all articles a term appeared in, not just the
+    latest one.
     """
     today = _date.today().isoformat()
     for term_dict in terms:
@@ -544,6 +584,15 @@ def store_extracted_terms_conn(
                 term_dict.get("last_seen", today),
             ),
         )
+        source_url = term_dict.get("source_url")
+        if source_url:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO term_occurrences (term, topic, source_url, seen_date)
+                VALUES (?, ?, ?, ?)
+                """,
+                (term, topic, source_url, term_dict.get("last_seen", today)),
+            )
     logger.debug("store_extracted_terms_conn: upserted %d term(s)", len(terms))
 
 
@@ -605,20 +654,22 @@ def get_top_terms_for_dim_conn(
 ) -> list[str]:
     """Return the top n term strings associated with a specific dimension.
 
-    Joins extracted_terms → seen_items via source_url to filter by dim_id.
-    Returns an empty list if no data exists for this dim_id yet — expected on
-    early runs or for new dimensions.  Never raises.
+    Joins term_occurrences → seen_items via source_url to filter by dim_id and
+    ranks terms by how many of this dimension's articles mention them (ties
+    broken alphabetically). Returns an empty list if no data exists for this
+    dim_id yet — expected on early runs or for new dimensions.  Never raises.
     """
     try:
         rows = conn.execute(
             """
-            SELECT et.term
-            FROM extracted_terms et
-            JOIN seen_items si ON et.source_url = si.url
+            SELECT tocc.term, COUNT(*) AS dim_freq
+            FROM term_occurrences tocc
+            JOIN seen_items si ON tocc.source_url = si.url
             WHERE si.topic = ?
               AND si.dim_id = ?
-              AND et.topic = ?
-            ORDER BY et.frequency DESC
+              AND tocc.topic = ?
+            GROUP BY tocc.term
+            ORDER BY dim_freq DESC, tocc.term ASC
             LIMIT ?
             """,
             (topic, dim_id, topic, n),
