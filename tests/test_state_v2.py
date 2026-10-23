@@ -8,12 +8,16 @@ All tests use an in-memory SQLite connection; no disk I/O occurs.
 import sqlite3
 from datetime import date, timedelta
 
+import numpy as np
 import pytest
 
+from redpill.registry import get_dimension_axis_tags
 from redpill.state import (
+    add_item_conn,
     get_query_performance_conn,
     get_recent_terms_conn,
     get_top_terms_conn,
+    get_top_terms_for_dim_conn,
     init_db_conn,
     log_query_conn,
     store_extracted_terms_conn,
@@ -394,3 +398,133 @@ class TestGetQueryPerformance:
         assert r["results_count"] == 15
         assert r["new_items"] == 8
         assert r["kept_items"] == 4
+
+
+# ---------------------------------------------------------------------------
+# term_occurrences + per-dimension term lookups
+# ---------------------------------------------------------------------------
+
+TOPIC = "contrastive learning"
+
+
+def _article(conn, url: str, dim_id: str, topic: str = TOPIC) -> None:
+    add_item_conn(url, "t", "h", np.zeros(3, dtype=np.float32), "s", topic, conn, dim_id=dim_id)
+
+
+def _seen(conn, term: str, url: str, topic: str = TOPIC, category: str = "technique") -> None:
+    store_extracted_terms_conn(
+        [_term(term, topic=topic, category=category, source_url=url)], conn
+    )
+
+
+class TestTermOccurrences:
+    def test_records_each_term_url_pair(self, conn):
+        _seen(conn, "SimCLR", "https://a.com")
+        _seen(conn, "SimCLR", "https://b.com")
+        rows = conn.execute(
+            "SELECT source_url FROM term_occurrences WHERE term = 'SimCLR' ORDER BY source_url"
+        ).fetchall()
+        assert [r["source_url"] for r in rows] == ["https://a.com", "https://b.com"]
+
+    def test_same_pair_recorded_once(self, conn):
+        _seen(conn, "SimCLR", "https://a.com")
+        _seen(conn, "SimCLR", "https://a.com")
+        count = conn.execute("SELECT COUNT(*) FROM term_occurrences").fetchone()[0]
+        assert count == 1
+
+    def test_null_source_url_not_recorded(self, conn):
+        store_extracted_terms_conn([_term(source_url=None)], conn)
+        count = conn.execute("SELECT COUNT(*) FROM term_occurrences").fetchone()[0]
+        assert count == 0
+
+    def test_backfills_from_legacy_extracted_terms(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        init_db_conn(c)
+        _seen(c, "SimCLR", "https://legacy.com")
+        c.execute("DROP TABLE term_occurrences")
+        init_db_conn(c)
+        rows = c.execute("SELECT term, source_url FROM term_occurrences").fetchall()
+        assert [(r["term"], r["source_url"]) for r in rows] == [("SimCLR", "https://legacy.com")]
+        c.close()
+
+    def test_backfill_is_idempotent(self, conn):
+        _seen(conn, "SimCLR", "https://a.com")
+        init_db_conn(conn)
+        init_db_conn(conn)
+        count = conn.execute("SELECT COUNT(*) FROM term_occurrences").fetchone()[0]
+        assert count == 1
+
+    def test_backfill_recovers_after_rolled_back_init(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        init_db_conn(c)
+        _seen(c, "SimCLR", "https://legacy.com")
+        c.execute("DELETE FROM term_occurrences")
+        c.commit()
+        c.rollback()  # table exists but holds no rows, as after a failed first init
+        init_db_conn(c)
+        count = c.execute("SELECT COUNT(*) FROM term_occurrences").fetchone()[0]
+        assert count == 1
+        c.close()
+
+
+class TestGetTopTermsForDimConn:
+    def test_term_stays_attributed_after_later_article_in_other_dim(self, conn):
+        # Regression: extracted_terms.source_url is overwritten with the latest
+        # URL, which used to move the term out of dim_a entirely.
+        _article(conn, "https://a1.com", "dim_a")
+        _article(conn, "https://b1.com", "dim_b")
+        _seen(conn, "SimCLR", "https://a1.com")
+        _seen(conn, "SimCLR", "https://b1.com")
+        assert get_top_terms_for_dim_conn(TOPIC, "dim_a", 10, conn) == ["SimCLR"]
+        assert get_top_terms_for_dim_conn(TOPIC, "dim_b", 10, conn) == ["SimCLR"]
+
+    def test_ranked_by_article_count_within_dim(self, conn):
+        for i in range(3):
+            _article(conn, f"https://a{i}.com", "dim_a")
+            _seen(conn, "Local", f"https://a{i}.com")
+        _article(conn, "https://a9.com", "dim_a")
+        _seen(conn, "Global", "https://a9.com")
+        # Global is far more frequent topic-wide, but only once in dim_a.
+        for i in range(10):
+            _article(conn, f"https://b{i}.com", "dim_b")
+            _seen(conn, "Global", f"https://b{i}.com")
+        assert get_top_terms_for_dim_conn(TOPIC, "dim_a", 10, conn) == ["Local", "Global"]
+
+    def test_respects_limit(self, conn):
+        _article(conn, "https://a.com", "dim_a")
+        for name in ("A", "B", "C"):
+            _seen(conn, name, "https://a.com")
+        assert get_top_terms_for_dim_conn(TOPIC, "dim_a", 2, conn) == ["A", "B"]
+
+    def test_filters_by_topic(self, conn):
+        _article(conn, "https://a.com", "dim_a")
+        _seen(conn, "Other", "https://a.com", topic="other topic")
+        assert get_top_terms_for_dim_conn(TOPIC, "dim_a", 10, conn) == []
+
+    def test_unknown_dim_returns_empty(self, conn):
+        assert get_top_terms_for_dim_conn(TOPIC, "dim_missing", 10, conn) == []
+
+    def test_query_failure_returns_empty(self, conn):
+        conn.execute("DROP TABLE term_occurrences")
+        assert get_top_terms_for_dim_conn(TOPIC, "dim_a", 10, conn) == []
+
+
+class TestGetDimensionAxisTags:
+    def test_counts_articles_per_term_across_dims(self, conn):
+        _article(conn, "https://a1.com", "dim_a")
+        _article(conn, "https://a2.com", "dim_a")
+        _article(conn, "https://b1.com", "dim_b")
+        _seen(conn, "SimCLR", "https://a1.com", category="technique")
+        _seen(conn, "SimCLR", "https://a2.com", category="technique")
+        _seen(conn, "ImageNet", "https://a1.com", category="dataset")
+        _seen(conn, "SimCLR", "https://b1.com", category="technique")
+        result = get_dimension_axis_tags("dim_a", TOPIC, conn)
+        assert result["tags"] == ["SimCLR", "ImageNet"]
+        assert result["primary_axis"] == "technique"
+
+    def test_no_terms_returns_unknown_axis(self, conn):
+        result = get_dimension_axis_tags("dim_a", TOPIC, conn)
+        assert result["primary_axis"] == "unknown"
+        assert result["tags"] == []
